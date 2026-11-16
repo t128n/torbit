@@ -6,6 +6,7 @@ Base: **Orbit v0.3.0**, commit `a7402204c7cadcac4747cbf47a60685a20f59498`.
 |---|---|---|
 | `0001-feat-windows-native-service.patch` | #81 | Native SCM service, `--name`/`--env-file`, `ORBIT_LOG_FILE`, Windows backup rename fixes |
 | `0002-feat-github-enterprise-host.patch` | #82 | Configurable GHES/GHEC host, derived endpoints, host binding |
+| `0003-feat-outbound-proxy-support.patch` | local | Reqwest system-proxy support for outbound requests |
 
 Polling is not included.
 
@@ -61,6 +62,14 @@ CREATE TABLE IF NOT EXISTS worbit_github_host_binding (
 
 That keeps `schema_migrations` at the stock Orbit version. The `worbit_` prefix
 avoids a collision if upstream ever adds its own binding table.
+
+## 0003 details
+
+- Enables Reqwest's `system-proxy` feature for the server and platform crates.
+- Documents the service-process proxy configuration required for GitHub's
+  outbound HTTPS requests.
+- Adds `apps/server/tests/system_proxy.rs`, which verifies the GitHub OAuth
+  client sends HTTPS requests through `HTTPS_PROXY`.
 
 ## Generating a patch
 

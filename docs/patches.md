@@ -10,7 +10,8 @@ hand.
 patches/
 ├── series
 ├── 0001-feat-windows-native-service.patch
-└── 0002-feat-github-enterprise-host.patch
+├── 0002-feat-github-enterprise-host.patch
+└── 0003-feat-outbound-proxy-support.patch
 ```
 
 `series` controls order and can carry comments:
@@ -18,6 +19,7 @@ patches/
 ```text
 0001-feat-windows-native-service.patch
 0002-feat-github-enterprise-host.patch
+0003-feat-outbound-proxy-support.patch
 ```
 
 Polling is not part of the series.
@@ -87,3 +89,4 @@ prefix so an upstream feature cannot collide with it.
 |---|---|---|
 | Native Windows Service | coollabsio/orbit#81 | local, upstreamable |
 | GitHub Enterprise host | coollabsio/orbit#82 | local, upstreamable |
+| Outbound system proxy | — | local, upstreamable |

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0+4
+
+- Enable Reqwest system proxy support for outbound GitHub requests.
+- Document proxy configuration for the Orbit process and Windows service.
+- Test that GitHub OAuth requests use `HTTPS_PROXY`.
+
 ## 0.3.0+3
 
 - Create the app key during install when `ORBIT_APP_KEY_FILE` is missing, using

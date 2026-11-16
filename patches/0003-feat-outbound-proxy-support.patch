@@ -1,0 +1,228 @@
+From 323b7d45e6eacc264fda9e3d11bde5554acbddc8 Mon Sep 17 00:00:00 2001
+From: OpenCode Agent <opencode@localhost>
+Date: Mon, 16 Nov 2026 18:47:56 +0100
+Subject: [PATCH] feat(proxy): support outbound system proxies
+
+Enable Reqwest system proxy support for outbound clients, document the proxy context required for Windows services, and verify that the GitHub OAuth client sends HTTPS requests through HTTPS_PROXY.
+---
+ Cargo.lock                        | 44 +++++++++++++++++
+ apps/server/Cargo.toml            |  2 +-
+ apps/server/tests/system_proxy.rs | 82 +++++++++++++++++++++++++++++++
+ crates/platform/Cargo.toml        |  2 +-
+ docs/github.md                    |  6 +++
+ 5 files changed, 134 insertions(+), 2 deletions(-)
+ create mode 100644 apps/server/tests/system_proxy.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index aabd935f..d9fb34fd 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -626,6 +626,16 @@ version = "0.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+ 
++[[package]]
++name = "core-foundation"
++version = "0.9.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
++dependencies = [
++ "core-foundation-sys",
++ "libc",
++]
++
+ [[package]]
+ name = "core-foundation-sys"
+ version = "0.8.7"
+@@ -1701,9 +1711,11 @@ dependencies = [
+  "percent-encoding",
+  "pin-project-lite",
+  "socket2",
++ "system-configuration",
+  "tokio",
+  "tower-service",
+  "tracing",
++ "windows-registry",
+ ]
+ 
+ [[package]]
+@@ -3925,6 +3937,27 @@ dependencies = [
+  "syn 2.0.119",
+ ]
+ 
++[[package]]
++name = "system-configuration"
++version = "0.7.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
++dependencies = [
++ "bitflags 2.13.1",
++ "core-foundation",
++ "system-configuration-sys",
++]
++
++[[package]]
++name = "system-configuration-sys"
++version = "0.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
++dependencies = [
++ "core-foundation-sys",
++ "libc",
++]
++
+ [[package]]
+ name = "tempfile"
+ version = "3.27.0"
+@@ -4707,6 +4740,17 @@ version = "0.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+ 
++[[package]]
++name = "windows-registry"
++version = "0.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
++dependencies = [
++ "windows-link",
++ "windows-result",
++ "windows-strings",
++]
++
+ [[package]]
+ name = "windows-result"
+ version = "0.4.1"
+diff --git a/apps/server/Cargo.toml b/apps/server/Cargo.toml
+index 440e44e5..166266e1 100644
+--- a/apps/server/Cargo.toml
++++ b/apps/server/Cargo.toml
+@@ -16,7 +16,7 @@ clap = { version = "4", features = ["derive"] }
+ futures-util = "0.3"
+ hmac = "0.12"
+ lettre = { version = "0.11.23", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
+-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
++reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "system-proxy"] }
+ http-body-util = "0.1"
+ include_dir = "0.7"
+ # The bundled time zone database: the Alpine image has no zoneinfo.
+diff --git a/apps/server/tests/system_proxy.rs b/apps/server/tests/system_proxy.rs
+new file mode 100644
+index 00000000..c669ee66
+--- /dev/null
++++ b/apps/server/tests/system_proxy.rs
+@@ -0,0 +1,82 @@
++use std::time::Duration;
++
++use orbit_server::sign_in_providers::{
++    Provider, ProviderClient, ProviderCredentials, ProviderEndpoints, ProviderFailure,
++};
++use tokio::io::{AsyncReadExt, AsyncWriteExt};
++use tokio::net::TcpListener;
++use tokio::time::timeout;
++
++#[tokio::test]
++async fn github_provider_uses_https_proxy_from_process_environment() {
++    // This integration-test binary has one test, so its process environment is isolated.
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let proxy = format!("http://{}", listener.local_addr().unwrap());
++    unsafe {
++        for name in [
++            "HTTP_PROXY",
++            "http_proxy",
++            "ALL_PROXY",
++            "all_proxy",
++            "NO_PROXY",
++            "no_proxy",
++        ] {
++            std::env::remove_var(name);
++        }
++        std::env::set_var("HTTPS_PROXY", &proxy);
++        std::env::set_var("https_proxy", &proxy);
++        std::env::set_var("NO_PROXY", "");
++        std::env::set_var("no_proxy", "");
++    }
++
++    let proxy_request = tokio::spawn(async move {
++        let (mut connection, _) = listener.accept().await.unwrap();
++        let mut headers = Vec::new();
++        let mut buffer = [0_u8; 1024];
++        loop {
++            let count = connection.read(&mut buffer).await.unwrap();
++            assert_ne!(count, 0, "proxy connection closed before request headers");
++            headers.extend_from_slice(&buffer[..count]);
++            if headers.windows(4).any(|window| window == b"\r\n\r\n") {
++                break;
++            }
++        }
++        let request_line = String::from_utf8_lossy(&headers)
++            .lines()
++            .next()
++            .unwrap()
++            .to_owned();
++        connection
++            .write_all(
++                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
++            )
++            .await
++            .unwrap();
++        request_line
++    });
++
++    let client = ProviderClient::new(ProviderEndpoints::default());
++    let result = timeout(
++        Duration::from_secs(5),
++        client.profile(
++            Provider::Github,
++            &ProviderCredentials {
++                client_id: "test-client".to_owned(),
++                client_secret: "test-secret".to_owned(),
++            },
++            "https://orbit.test/api/v1/auth/providers/github/callback",
++            "test-code",
++            "test-verifier",
++        ),
++    )
++    .await
++    .expect("GitHub provider request should go through the local proxy");
++    assert_eq!(result, Err(ProviderFailure::Unavailable));
++    assert_eq!(
++        timeout(Duration::from_secs(1), proxy_request)
++            .await
++            .expect("Reqwest should connect to the configured proxy")
++            .unwrap(),
++        "CONNECT github.com:443 HTTP/1.1"
++    );
++}
+diff --git a/crates/platform/Cargo.toml b/crates/platform/Cargo.toml
+index 60170416..216b2213 100644
+--- a/crates/platform/Cargo.toml
++++ b/crates/platform/Cargo.toml
+@@ -17,7 +17,7 @@ hmac = "0.12"
+ http-body-util = "0.1"
+ ipnet = "2"
+ rand = "0.8"
+-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
++reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "system-proxy"] }
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ sha2 = "0.10"
+diff --git a/docs/github.md b/docs/github.md
+index 05654cf6..395c7840 100644
+--- a/docs/github.md
++++ b/docs/github.md
+@@ -26,6 +26,12 @@ The database binds to one GitHub host. Existing databases with GitHub records ar
+ 
+ For local development, `just dev` also loads a root `.env.local` file. Put `ORBIT_APP_KEY=<base64-key>` there. Keep the file private and out of Git. Open Orbit through a public HTTPS tunnel to the web server before you select **Register GitHub App**. You do not need to set `ORBIT_PUBLIC_ORIGIN` to the tunnel URL for this development flow. A plain `http://127.0.0.1` tab cannot register a GitHub App.
+ 
++## Outbound proxy
++
++GitHub App registration and GitHub sign-in make outbound HTTPS requests from the Orbit process. Reqwest uses the system proxy configuration when one is available. For environment-variable configuration, use `HTTPS_PROXY` or `ALL_PROXY` (for example, `HTTPS_PROXY=http://proxy.internal:3128`); `HTTP_PROXY` alone does not proxy these HTTPS requests.
++
++The proxy setting must be available to the Orbit process, including when it runs as a Windows service. On Windows, Reqwest checks the process environment and then the Internet Settings for the service account; an interactive administrator's per-user proxy setting may not apply to the service. Values in Orbit's `ORBIT_ENV_FILE` configure Orbit but are not exported as process environment variables for Reqwest.
++
+ ## Register the workspace App and connect a project
+ 
+ 1. Open **Settings → GitHub** as a workspace owner or admin.
+-- 
+2.56.0.windows.4
+

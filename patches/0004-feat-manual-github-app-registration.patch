@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenCode Agent <opencode@localhost>
+Date: Mon, 17 Nov 2026 12:00:00 +0100
+Subject: [PATCH] feat(github): add manual app registration endpoint
+
+Adds POST /api/v1/workspaces/{workspace_id}/github/manual-registration
+for manually registering a GitHub App when the manifest flow is not
+available (e.g., personal accounts on GHES that don't support manifest
+creation).
+
+The endpoint accepts:
+- app_id: GitHub App ID
+- slug: GitHub App slug (URL-friendly name)
+- private_key: PEM-formatted private key
+- webhook_secret: Webhook secret configured in GitHub
+
+This bypasses the manifest flow while still using Orbit's internal
+encryption and validation.
+---
+ apps/server/src/integration_routes.rs | 132 ++++++++++++++++++++++++++
+ 1 file changed, 132 insertions(+)
+
+diff --git a/apps/server/src/integration_routes.rs b/apps/server/src/integration_routes.rs
+index 8632cc06..679f7c1e 100644
+--- a/apps/server/src/integration_routes.rs
++++ b/apps/server/src/integration_routes.rs
+@@ -174,6 +174,10 @@ pub fn integration_router(state: IntegrationState) -> Router {
+             "/api/v1/workspaces/{workspace_id}/github/manifest",
+             post(start_github_manifest),
+         )
++        .route(
++            "/api/v1/workspaces/{workspace_id}/github/manual-registration",
++            post(register_github_app_manually),
++        )
+         .with_state(state)
+ }
+ 
+@@ -223,6 +227,22 @@ pub struct GithubProjectConnectionBody {
+     label: String,
+ }
+ 
++#[derive(Deserialize, ToSchema)]
++#[serde(deny_unknown_fields)]
++pub struct GithubManualRegistrationBody {
++    /// GitHub App ID (from the app's about section)
++    app_id: i64,
++    /// GitHub App slug (URL-friendly name from the app's about section)
++    slug: String,
++    /// PEM-formatted private key (download from GitHub after generating)
++    private_key: String,
++    /// Webhook secret (the one you configured in the app settings)
++    webhook_secret: String,
++    /// Generate a new webhook secret if the existing one is unknown
++    #[serde(default)]
++    generate_webhook_secret: bool,
++}
++
+ #[derive(Deserialize)]
+ pub(crate) struct GithubManifestCallbackQuery {
+     code: String,
+@@ -689,6 +709,128 @@ pub(crate) async fn start_github_manifest(
+     }))
+ }
+ 
++#[utoipa::path(
++    post,
++    path = "/api/v1/workspaces/{workspace_id}/github/manual-registration",
++    params(("workspace_id" = String, Path)),
++    request_body = GithubManualRegistrationBody,
++    responses((status = 200, description = "GitHub App registered successfully"))
++)]
++/// Manually register a GitHub App when the manifest flow is unavailable.
++///
++/// This endpoint is useful for:
++/// - GitHub Enterprise instances where manifest creation requires organization membership
++/// - Personal account apps that cannot use the manifest flow
++/// - Recovering from a failed manifest registration
++///
++/// The app must already be created on GitHub with:
++/// - Permissions: issues (read), pull_requests (read)
++/// - Events: issues, pull_request
++/// - Webhook URL: {ORBIT_PUBLIC_ORIGIN}/api/v1/integrations/github/webhook
++pub(crate) async fn register_github_app_manually(
++    State(state): State<IntegrationState>,
++    Path(workspace): Path<String>,
++    headers: HeaderMap,
++    request_id: Option<Extension<RequestId>>,
++    ApiJson(body): ApiJson<GithubManualRegistrationBody>,
++) -> Result<StatusCode, ApiError> {
++    let id = request_id.as_ref().map(|Extension(id)| id);
++    let settings = github_settings_context(&state, id)?;
++    let key = app_key(settings, id)?;
++    let (_, can_manage) = github_workspace_access(&state, &headers, &workspace, id).await?;
++    require_github_manager(can_manage, id)?;
++    check_github_binding(&state, id).await?;
++
++    if body.app_id <= 0 {
++        return Err(ApiError::new(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "invalid_github_app_id",
++            "Invalid GitHub App ID",
++            "GitHub App ID must be a positive number.",
++            id,
++        ));
++    }
++
++    let slug = body.slug.trim();
++    if slug.is_empty() || slug.len() > 100 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
++        return Err(ApiError::new(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "invalid_github_slug",
++            "Invalid GitHub App slug",
++            "Slug must be 1-100 alphanumeric characters or hyphens.",
++            id,
++        ));
++    }
++
++    let private_key = body.private_key.trim();
++    if private_key.is_empty() || (!private_key.contains("-----BEGIN RSA PRIVATE KEY-----")
++        && !private_key.contains("-----BEGIN PRIVATE KEY-----")
++        && !private_key.contains("-----BEGIN OPENSSH PRIVATE KEY-----"))
++    {
++        return Err(ApiError::new(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "invalid_github_private_key",
++            "Invalid private key",
++            "Private key must be in PEM format (RSA, PKCS#8, or OpenSSH).",
++            id,
++        ));
++    }
++
++    let webhook_secret = body.webhook_secret.trim();
++    if webhook_secret.is_empty() && !body.generate_webhook_secret {
++        return Err(ApiError::new(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "invalid_github_webhook_secret",
++            "Invalid webhook secret",
++            "Webhook secret cannot be empty. Set generate_webhook_secret to true to auto-generate one.",
++            id,
++        ));
++    }
++
++    let Flag(exists) = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM github_apps WHERE workspace_id = $1)")
++        .bind(&workspace)
++        .fetch_one(state.tasks.database().pool())
++        .await
++        .map_err(|_| ApiError::internal(id))?;
++    if exists {
++        return Err(ApiError::new(
++            StatusCode::CONFLICT,
++            "github_app_exists",
++            "GitHub App exists",
++            "This workspace already has a GitHub App. Delete it first if you want to register a different one.",
++            id,
++        ));
++    }
++
++    let encrypted_private_key = encrypt_github_secret(&key, private_key)
++        .map_err(|()| ApiError::internal(id))?;
++
++    let final_webhook_secret = if webhook_secret.is_empty() {
++        orbit_platform::generate_opaque_token()
++    } else {
++        webhook_secret.to_owned()
++    };
++
++    let encrypted_webhook_secret = encrypt_github_secret(&key, &final_webhook_secret)
++        .map_err(|()| ApiError::internal(id))?;
++
++    let mut tx = state.tasks.database().immediate_transaction().await
++        .map_err(|_| ApiError::internal(id))?;
++
++    sqlx::query("INSERT INTO github_apps (workspace_id, app_id, slug, private_key_encrypted, webhook_secret_encrypted, created_at) VALUES ($1, $2, $3, $4, $5, $6)")
++        .bind(&workspace).bind(body.app_id).bind(slug)
++        .bind(encrypted_private_key).bind(encrypted_webhook_secret)
++        .bind(TimestampMillis::now().as_millis())
++        .execute(&mut *tx).await
++        .map_err(|_| ApiError::internal(id))?;
++
++    record_github_change(&mut tx, &workspace, "github.app.registered_manually", id).await?;
++    tx.commit().await.map_err(|_| ApiError::internal(id))?;
++
++    tracing::info!(workspace_id = %workspace, app_id = body.app_id, slug = slug, "GitHub App registered manually");
++    Ok(StatusCode::OK)
++}
++
+ #[derive(Deserialize)]
+ struct GithubManifestConversion {
+     id: i64,
+-- 
+2.47.0.windows.1

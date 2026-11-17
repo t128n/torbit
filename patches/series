@@ -2,3 +2,4 @@
 0001-feat-windows-native-service.patch
 0002-feat-github-enterprise-host.patch
 0003-feat-outbound-proxy-support.patch
+0004-feat-manual-github-app-registration.patch

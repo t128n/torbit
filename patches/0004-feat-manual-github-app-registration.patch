@@ -144,7 +144,7 @@ index 8632cc06..679f7c1e 100644
 +        .bind(&workspace)
 +        .fetch_one(state.tasks.database().pool())
 +        .await
-+        .map_err(|error| ApiError::internal(id).cause(error))?;
++        .map_err(|_| ApiError::internal(id))?;
 +    if exists {
 +        return Err(ApiError::new(
 +            StatusCode::CONFLICT,
@@ -156,7 +156,7 @@ index 8632cc06..679f7c1e 100644
 +    }
 +
 +    let encrypted_private_key = encrypt_github_secret(&key, private_key)
-+        .map_err(|()| ApiError::internal(id).cause("Could not encrypt the private key"))?;
++        .map_err(|()| ApiError::internal(id))?;
 +
 +    let final_webhook_secret = if webhook_secret.is_empty() {
 +        orbit_platform::generate_opaque_token()
@@ -165,20 +165,20 @@ index 8632cc06..679f7c1e 100644
 +    };
 +
 +    let encrypted_webhook_secret = encrypt_github_secret(&key, &final_webhook_secret)
-+        .map_err(|()| ApiError::internal(id).cause("Could not encrypt the webhook secret"))?;
++        .map_err(|()| ApiError::internal(id))?;
 +
 +    let mut tx = state.tasks.database().immediate_transaction().await
-+        .map_err(|error| ApiError::internal(id).cause(error))?;
++        .map_err(|_| ApiError::internal(id))?;
 +
 +    sqlx::query("INSERT INTO github_apps (workspace_id, app_id, slug, private_key_encrypted, webhook_secret_encrypted, created_at) VALUES ($1, $2, $3, $4, $5, $6)")
 +        .bind(&workspace).bind(body.app_id).bind(slug)
 +        .bind(encrypted_private_key).bind(encrypted_webhook_secret)
 +        .bind(TimestampMillis::now().as_millis())
 +        .execute(&mut *tx).await
-+        .map_err(|error| ApiError::internal(id).cause(error))?;
++        .map_err(|_| ApiError::internal(id))?;
 +
 +    record_github_change(&mut tx, &workspace, "github.app.registered_manually", id).await?;
-+    tx.commit().await.map_err(|error| ApiError::internal(id).cause(error))?;
++    tx.commit().await.map_err(|_| ApiError::internal(id))?;
 +
 +    tracing::info!(workspace_id = %workspace, app_id = body.app_id, slug = slug, "GitHub App registered manually");
 +    Ok(StatusCode::OK)

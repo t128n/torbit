@@ -7,6 +7,7 @@ Base: **Orbit v0.3.0**, commit `a7402204c7cadcac4747cbf47a60685a20f59498`.
 | `0001-feat-windows-native-service.patch` | #81 | Native SCM service, `--name`/`--env-file`, `ORBIT_LOG_FILE`, Windows backup rename fixes |
 | `0002-feat-github-enterprise-host.patch` | #82 | Configurable GHES/GHEC host, derived endpoints, host binding |
 | `0003-feat-outbound-proxy-support.patch` | local | Reqwest system-proxy support for outbound requests |
+| `0004-feat-manual-github-app-registration.patch` | local | Manual GitHub App registration API for GHES without manifest flow |
 
 Polling is not included.
 
@@ -70,6 +71,34 @@ avoids a collision if upstream ever adds its own binding table.
   outbound HTTPS requests.
 - Adds `apps/server/tests/system_proxy.rs`, which verifies the GitHub OAuth
   client sends HTTPS requests through `HTTPS_PROXY`.
+
+## 0004 details
+
+Adds a manual GitHub App registration endpoint for situations where the manifest
+flow is not available:
+
+```
+POST /api/v1/workspaces/{workspace_id}/github/manual-registration
+{
+    "app_id": 123456,
+    "slug": "orbit-app",
+    "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...",
+    "webhook_secret": "your-webhook-secret"
+}
+```
+
+Use cases:
+- GitHub Enterprise where manifest creation requires organization membership
+- Personal account apps that cannot use the manifest flow
+- Re-registering an existing app after credential rotation
+
+The app must already exist on GitHub with the correct configuration:
+- Permissions: `issues:read`, `pull_requests:read`
+- Events: `issues`, `pull_request`
+- Webhook URL: `{ORBIT_PUBLIC_ORIGIN}/api/v1/integrations/github/webhook`
+
+After registration, install the app at:
+`{GITHUB_HOST}/apps/{slug}/installations/new`
 
 ## Generating a patch
 

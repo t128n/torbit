@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1+1
+
+- Rebase the patch series onto upstream Orbit `v0.4.1`. Resolve conflicts in the
+  GitHub host patch (`integration_routes.rs`, `config.rs`, deploy compose and
+  operations docs) and update the proxy test for the new `issuer` field.
+- Keep Windows path separators in the write-lock call-site tag, so the upstream
+  `write_lock` unit test passes on Windows (patch 0001).
+
 ## 0.3.0+3
 
 - Create the app key during install when `ORBIT_APP_KEY_FILE` is missing, using

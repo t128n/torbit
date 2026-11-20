@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 0d025d8d8d00da992321087ad458e3ff6eead512 Mon Sep 17 00:00:00 2001
 From: OpenCode Agent <opencode@localhost>
-Date: Mon, 17 Nov 2026 12:00:00 +0100
-Subject: [PATCH] feat(github): add manual app registration endpoint
+Date: Tue, 17 Nov 2026 12:00:00 +0100
+Subject: [PATCH 4/4] feat(github): add manual app registration endpoint
 
 Adds POST /api/v1/workspaces/{workspace_id}/github/manual-registration
 for manually registering a GitHub App when the manifest flow is not
@@ -17,14 +17,14 @@ The endpoint accepts:
 This bypasses the manifest flow while still using Orbit's internal
 encryption and validation.
 ---
- apps/server/src/integration_routes.rs | 132 ++++++++++++++++++++++++++
- 1 file changed, 132 insertions(+)
+ apps/server/src/integration_routes.rs | 142 ++++++++++++++++++++++++++
+ 1 file changed, 142 insertions(+)
 
 diff --git a/apps/server/src/integration_routes.rs b/apps/server/src/integration_routes.rs
-index 8632cc06..679f7c1e 100644
+index ac6bc929..70bb6521 100644
 --- a/apps/server/src/integration_routes.rs
 +++ b/apps/server/src/integration_routes.rs
-@@ -174,6 +174,10 @@ pub fn integration_router(state: IntegrationState) -> Router {
+@@ -175,6 +175,10 @@ pub fn integration_router(state: IntegrationState) -> Router {
              "/api/v1/workspaces/{workspace_id}/github/manifest",
              post(start_github_manifest),
          )
@@ -35,7 +35,7 @@ index 8632cc06..679f7c1e 100644
          .with_state(state)
  }
  
-@@ -223,6 +227,22 @@ pub struct GithubProjectConnectionBody {
+@@ -224,6 +228,22 @@ pub struct GithubProjectConnectionBody {
      label: String,
  }
  
@@ -58,7 +58,7 @@ index 8632cc06..679f7c1e 100644
  #[derive(Deserialize)]
  pub(crate) struct GithubManifestCallbackQuery {
      code: String,
-@@ -689,6 +709,128 @@ pub(crate) async fn start_github_manifest(
+@@ -696,6 +716,128 @@ pub(crate) async fn start_github_manifest(
      }))
  }
  
@@ -188,4 +188,5 @@ index 8632cc06..679f7c1e 100644
  struct GithubManifestConversion {
      id: i64,
 -- 
-2.47.0.windows.1
+2.56.0.windows.4
+

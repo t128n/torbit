@@ -1,7 +1,8 @@
-From 7bd3705358c7efc69fea5d0de5176dcb6fb4d77f Mon Sep 17 00:00:00 2001
+From 2a2c9ab333aff9c180d0758f5b05cfcce6c061ee Mon Sep 17 00:00:00 2001
 From: Torben Haack <t128n@ipv4.8shield.net>
 Date: Wed, 11 Nov 2026 21:51:39 +0100
-Subject: [PATCH] feat(github): support configurable GitHub Enterprise hosts
+Subject: [PATCH 2/4] feat(github): support configurable GitHub Enterprise
+ hosts
 
 Adds ORBIT_GITHUB_URL for GHES and GHEC, derives the REST, GraphQL, OAuth, manifest, installation and link URLs from the configured host, and threads the host through sign-in, integrations, link previews, CSP and task links. The host binding lives in an unmanaged worbit_github_host_binding table so the main Orbit schema version stays stock.
 ---
@@ -42,10 +43,10 @@ Adds ORBIT_GITHUB_URL for GHES and GHEC, derives the REST, GraphQL, OAuth, manif
  create mode 100644 crates/platform/src/github.rs
 
 diff --git a/apps/server/src/app.rs b/apps/server/src/app.rs
-index 9c5393a..4de7b2c 100644
+index f9e54673..9f967f4a 100644
 --- a/apps/server/src/app.rs
 +++ b/apps/server/src/app.rs
-@@ -178,6 +178,10 @@ impl App {
+@@ -190,6 +190,10 @@ impl App {
              .await
              .map_err(|error| AppError::Migration(error.to_string()))?;
  
@@ -56,7 +57,7 @@ index 9c5393a..4de7b2c 100644
          let integrity = IntegrityService::new(database.clone());
          integrity
              .quick()
-@@ -197,6 +201,7 @@ impl App {
+@@ -209,6 +213,7 @@ impl App {
          }
  
          TaskRepository::new(database.clone())
@@ -64,7 +65,7 @@ index 9c5393a..4de7b2c 100644
              .reconcile_github_attribution(orbit_platform::TimestampMillis::now())
              .await
              .map_err(|error| AppError::Database(error.to_string()))?;
-@@ -409,11 +414,15 @@ impl App {
+@@ -515,11 +520,15 @@ impl App {
          );
          let router = metrics.instrument(production_router(
              ApiRoutes {
@@ -81,7 +82,7 @@ index 9c5393a..4de7b2c 100644
                      )
                      .with_content(
                          Arc::new(crate::repositories::pages::PageRepository::new(
-@@ -430,7 +439,10 @@ impl App {
+@@ -536,7 +545,10 @@ impl App {
                  public_api: crate::public_api::router(
                      crate::public_api::PublicApiState::new(
                          Arc::new(ApiTokenRepository::new(database.clone())),
@@ -93,7 +94,7 @@ index 9c5393a..4de7b2c 100644
                          &config.http.public_origin,
                      )
                      .with_pages(Arc::new(crate::repositories::pages::PageRepository::new(
-@@ -441,6 +453,7 @@ impl App {
+@@ -547,6 +559,7 @@ impl App {
                  oauth: crate::oauth::router(oauth),
                  auth: {
                      let auth = auth
@@ -101,7 +102,7 @@ index 9c5393a..4de7b2c 100644
                          .with_mailer(mailer.clone())
                          .with_rate_limits(config.rate_limits)
                          .with_uploads(attachment_state.uploads.clone())
-@@ -458,6 +471,7 @@ impl App {
+@@ -564,6 +577,7 @@ impl App {
                      cookie_mode,
                      backups.clone(),
                  )
@@ -109,7 +110,7 @@ index 9c5393a..4de7b2c 100644
                  .with_mailer(mailer)
                  .with_rate_limits(config.rate_limits)
                  .with_object_storage(object_storage.clone(), blob_store.clone())
-@@ -474,8 +488,15 @@ impl App {
+@@ -580,8 +594,15 @@ impl App {
                      attachment_state.uploads.clone(),
                      cookie_mode,
                  ),
@@ -127,7 +128,7 @@ index 9c5393a..4de7b2c 100644
                  pages: PageState::new(Arc::clone(&identity), cookie_mode)
                      .with_socket_tickets(app_key.as_ref().map(SocketTickets::new)),
                  page_comments: PageCommentState::new(Arc::clone(&identity), cookie_mode),
-@@ -499,8 +520,12 @@ impl App {
+@@ -605,8 +626,12 @@ impl App {
                  attachments: attachment_state.clone(),
                  integrations: IntegrationState::new(
                      Arc::new(ApiTokenRepository::new(database.clone())),
@@ -142,12 +143,12 @@ index 9c5393a..4de7b2c 100644
                      Arc::clone(&identity),
                      cookie_mode,
 diff --git a/apps/server/src/auth_routes.rs b/apps/server/src/auth_routes.rs
-index 07b9458..c589008 100644
+index fca63fb7..2f3cb7a1 100644
 --- a/apps/server/src/auth_routes.rs
 +++ b/apps/server/src/auth_routes.rs
 @@ -186,11 +186,23 @@ pub struct AuthState {
      public_origin: Arc<str>,
-     /// Google and GitHub over HTTP.
+     /// Google, GitHub and OpenID Connect over HTTP.
      providers: crate::sign_in_providers::ProviderClient,
 +    github_host: orbit_platform::GitHubHost,
      /// Where a native provider sign-in may return to.
@@ -190,10 +191,10 @@ index 07b9458..c589008 100644
          }
      }
 diff --git a/apps/server/src/auth_routes/providers.rs b/apps/server/src/auth_routes/providers.rs
-index 12d77b7..0618bbd 100644
+index 1a788027..80b150cd 100644
 --- a/apps/server/src/auth_routes/providers.rs
 +++ b/apps/server/src/auth_routes/providers.rs
-@@ -64,7 +64,7 @@ pub(super) enum ProviderRedirect {
+@@ -65,7 +65,7 @@ pub(super) enum ProviderRedirect {
  /// A provider flow from start to exchange.
  #[derive(Clone, Serialize, Deserialize)]
  pub(super) struct ProviderFlow {
@@ -202,7 +203,7 @@ index 12d77b7..0618bbd 100644
      intent: ProviderIntent,
      /// S256 of the verifier the starting client keeps; the exchange must bring the verifier.
      client_challenge: String,
-@@ -194,6 +194,11 @@ pub(super) async fn start_provider_sign_in(
+@@ -206,6 +206,11 @@ pub(super) async fn start_provider_sign_in(
  ) -> Result<Json<StartProviderResponse>, ApiError> {
      let rid = request_id.as_ref();
      let provider = Provider::parse(&provider).ok_or_else(|| not_configured(START, rid))?;
@@ -213,8 +214,8 @@ index 12d77b7..0618bbd 100644
 +    }
      let credentials = credentials(&state, provider)
          .await
-         .map_err(|_| ApiError::internal(START, rid))?
-@@ -349,6 +354,13 @@ pub(super) async fn provider_callback(
+         .map_err(|error| ApiError::internal(START, rid).cause(error))?
+@@ -375,6 +380,13 @@ pub(super) async fn provider_callback(
      if Provider::parse(&provider) != Some(flow.provider) {
          return expired();
      }
@@ -228,7 +229,7 @@ index 12d77b7..0618bbd 100644
      let outcome = match (query.error, query.code) {
          (None, Some(code)) => match credentials(&state, flow.provider).await {
              Ok(Some(credentials)) => {
-@@ -546,6 +558,9 @@ pub(super) async fn exchange_provider_sign_in(
+@@ -572,6 +584,9 @@ pub(super) async fn exchange_provider_sign_in(
              ));
          }
      };
@@ -238,7 +239,7 @@ index 12d77b7..0618bbd 100644
      match flow.intent {
          ProviderIntent::SignIn => sign_in(&state, &headers, profile, rid).await,
          ProviderIntent::Connect {
-@@ -558,6 +573,7 @@ pub(super) async fn exchange_provider_sign_in(
+@@ -584,6 +599,7 @@ pub(super) async fn exchange_provider_sign_in(
                  .connect_identity(
                      user_id,
                      &profile,
@@ -246,7 +247,7 @@ index 12d77b7..0618bbd 100644
                      request_id_value(rid),
                      TimestampMillis::now(),
                  )
-@@ -576,6 +592,7 @@ pub(super) async fn exchange_provider_sign_in(
+@@ -602,6 +618,7 @@ pub(super) async fn exchange_provider_sign_in(
                      session_id,
                      user_id,
                      &profile,
@@ -254,7 +255,7 @@ index 12d77b7..0618bbd 100644
                      request_id_value(rid),
                      TimestampMillis::now(),
                  )
-@@ -599,7 +616,12 @@ async fn sign_in(
+@@ -625,7 +642,12 @@ async fn sign_in(
      };
      let account = match state
          .repository
@@ -268,7 +269,7 @@ index 12d77b7..0618bbd 100644
          .await
      {
          Ok(account) => account,
-@@ -643,6 +665,7 @@ async fn finish_sign_in(
+@@ -671,6 +693,7 @@ async fn finish_sign_in(
          .create_provider_session_audited(
              &user,
              &profile,
@@ -276,7 +277,7 @@ index 12d77b7..0618bbd 100644
              link,
              request_id_value(rid),
              TimestampMillis::now(),
-@@ -958,6 +981,7 @@ pub(super) async fn disconnect_connected_account(
+@@ -990,6 +1013,7 @@ pub(super) async fn disconnect_connected_account(
          .disconnect_identity(
              session.user.id,
              provider,
@@ -285,7 +286,7 @@ index 12d77b7..0618bbd 100644
              TimestampMillis::now(),
          )
 diff --git a/apps/server/src/auth_routes/two_factor.rs b/apps/server/src/auth_routes/two_factor.rs
-index 75fb73b..b34640a 100644
+index 2a3d6860..196d0bad 100644
 --- a/apps/server/src/auth_routes/two_factor.rs
 +++ b/apps/server/src/auth_routes/two_factor.rs
 @@ -28,7 +28,7 @@ use crate::repositories::identity::{AuthenticatedSession, IdentityError};
@@ -422,7 +423,7 @@ index 75fb73b..b34640a 100644
          request_id_value(request_id.as_ref()),
      )
      .await
-@@ -409,7 +458,14 @@ pub(super) async fn login_second_factor(
+@@ -412,7 +461,14 @@ pub(super) async fn login_second_factor(
              })?,
          FirstFactor::Provider { profile, link } => state
              .repository
@@ -438,7 +439,7 @@ index 75fb73b..b34640a 100644
              .await
              .map_err(|error| match error {
                  ProviderSignInError::Refused(_) => expired(),
-@@ -432,6 +488,7 @@ async fn check_code(
+@@ -435,6 +491,7 @@ async fn check_code(
      state: &AuthState,
      user: &AuthenticatedUser,
      code: &str,
@@ -446,7 +447,7 @@ index 75fb73b..b34640a 100644
      request_id: &str,
  ) -> Result<bool, IdentityError> {
      let code = code.trim().replace(' ', "");
-@@ -439,7 +496,10 @@ async fn check_code(
+@@ -442,7 +499,10 @@ async fn check_code(
          let Some(step) = totp_step(state, user, &code).await? else {
              return Ok(false);
          };
@@ -458,7 +459,7 @@ index 75fb73b..b34640a 100644
      }
      let Some(codes_key) = recovery_code_key(state) else {
          return Ok(false);
-@@ -450,6 +510,7 @@ async fn check_code(
+@@ -453,6 +513,7 @@ async fn check_code(
              user.id,
              &code,
              &codes_key,
@@ -466,7 +467,7 @@ index 75fb73b..b34640a 100644
              request_id,
              TimestampMillis::now(),
          )
-@@ -834,3 +895,127 @@ pub(super) async fn confirm_identity(
+@@ -844,3 +905,127 @@ pub(super) async fn confirm_identity(
          request_id,
      ))
  }
@@ -596,7 +597,7 @@ index 75fb73b..b34640a 100644
 +}
 diff --git a/apps/server/src/github_binding.rs b/apps/server/src/github_binding.rs
 new file mode 100644
-index 0000000..270abdc
+index 00000000..270abdcb
 --- /dev/null
 +++ b/apps/server/src/github_binding.rs
 @@ -0,0 +1,322 @@
@@ -923,7 +924,7 @@ index 0000000..270abdc
 +    }
 +}
 diff --git a/apps/server/src/integration_routes.rs b/apps/server/src/integration_routes.rs
-index 9be9c4f..8632cc0 100644
+index 6810cb1b..ac6bc929 100644
 --- a/apps/server/src/integration_routes.rs
 +++ b/apps/server/src/integration_routes.rs
 @@ -9,7 +9,9 @@ use axum::routing::{get, post};
@@ -937,7 +938,7 @@ index 9be9c4f..8632cc0 100644
  use serde::de::DeserializeOwned;
  use serde::{Deserialize, Serialize};
  use serde_json::Value;
-@@ -67,6 +69,7 @@ pub struct IntegrationState {
+@@ -68,6 +70,7 @@ pub struct IntegrationState {
      tokens: Arc<ApiTokenRepository>,
      tasks: Arc<TaskRepository>,
      github_settings: Option<GithubSettings>,
@@ -945,7 +946,7 @@ index 9be9c4f..8632cc0 100644
  }
  
  #[derive(Clone)]
-@@ -86,6 +89,7 @@ impl IntegrationState {
+@@ -87,6 +90,7 @@ impl IntegrationState {
              tokens,
              tasks,
              github_settings: None,
@@ -953,7 +954,7 @@ index 9be9c4f..8632cc0 100644
          }
      }
  
-@@ -104,10 +108,48 @@ impl IntegrationState {
+@@ -105,10 +109,48 @@ impl IntegrationState {
              public_origin,
              allow_request_origin,
              encryption_key,
@@ -1003,7 +1004,7 @@ index 9be9c4f..8632cc0 100644
  }
  
  pub fn integration_router(state: IntegrationState) -> Router {
-@@ -348,6 +390,7 @@ pub(crate) async fn github_workspace_settings(
+@@ -351,6 +393,7 @@ pub(crate) async fn github_workspace_settings(
  ) -> Result<Json<GithubWorkspaceSettings>, ApiError> {
      let id = request_id.as_ref().map(|Extension(id)| id);
      let (_, can_manage) = github_workspace_access(&state, &headers, &workspace, id).await?;
@@ -1011,7 +1012,7 @@ index 9be9c4f..8632cc0 100644
      let app: Option<String> =
          sqlx::query_scalar("SELECT slug FROM github_apps WHERE workspace_id = $1")
              .bind(&workspace)
-@@ -357,7 +400,7 @@ pub(crate) async fn github_workspace_settings(
+@@ -360,7 +403,7 @@ pub(crate) async fn github_workspace_settings(
      Ok(Json(GithubWorkspaceSettings {
          install_url: app
              .as_ref()
@@ -1020,7 +1021,7 @@ index 9be9c4f..8632cc0 100644
          app_slug: app,
          repositories: github_repositories(&state, &workspace, id).await?,
          can_manage,
-@@ -378,6 +421,7 @@ pub(crate) async fn github_project_settings(
+@@ -381,6 +424,7 @@ pub(crate) async fn github_project_settings(
      let request_id = request_id.as_ref().map(|Extension(id)| id);
      let (_, _, can_manage) =
          github_project_access(&state, &headers, &workspace, &project, request_id).await?;
@@ -1028,7 +1029,7 @@ index 9be9c4f..8632cc0 100644
      let app: Option<String> =
          sqlx::query_scalar("SELECT slug FROM github_apps WHERE workspace_id = $1")
              .bind(&workspace)
-@@ -389,7 +433,7 @@ pub(crate) async fn github_project_settings(
+@@ -392,7 +436,7 @@ pub(crate) async fn github_project_settings(
      Ok(Json(GithubProjectSettings {
          install_url: app
              .as_ref()
@@ -1037,7 +1038,7 @@ index 9be9c4f..8632cc0 100644
          app_slug: app,
          repository: connection.as_ref().map(|row| row.get("repository")),
          label: connection.as_ref().map(|row| row.get("label")),
-@@ -430,6 +474,7 @@ pub(crate) async fn save_github_project_connection(
+@@ -433,6 +477,7 @@ pub(crate) async fn save_github_project_connection(
      let (_, _, can_manage) =
          github_project_access(&state, &headers, &workspace, &project, id).await?;
      require_github_manager(can_manage, id)?;
@@ -1045,15 +1046,15 @@ index 9be9c4f..8632cc0 100644
      let label = body.label.trim();
      if !valid_repository(&body.repository) || label.is_empty() || label.chars().count() > 50 {
          return Err(ApiError::new(
-@@ -457,6 +502,7 @@ pub(crate) async fn save_github_project_connection(
+@@ -460,6 +505,7 @@ pub(crate) async fn save_github_project_connection(
          .immediate_transaction()
          .await
-         .map_err(|_| ApiError::internal(id))?;
+         .map_err(|error| ApiError::internal(id).cause(error))?;
 +    check_github_binding_tx(&state, &mut tx, id).await?;
      let changed = sqlx::query("INSERT INTO github_project_connections (workspace_id, project_id, installation_id, repository, label) VALUES ($1, $2, $3, $4, $5) ON CONFLICT(project_id) DO UPDATE SET installation_id = excluded.installation_id, repository = excluded.repository, label = excluded.label WHERE github_project_connections.installation_id != excluded.installation_id OR github_project_connections.repository != excluded.repository OR github_project_connections.label != excluded.label")
          .bind(&workspace).bind(&project).bind(body.installation_id).bind(&body.repository).bind(label).execute(&mut *tx).await;
      match changed {
-@@ -496,12 +542,14 @@ pub(crate) async fn delete_github_project_connection(
+@@ -501,12 +547,14 @@ pub(crate) async fn delete_github_project_connection(
      let (_, _, can_manage) =
          github_project_access(&state, &headers, &workspace, &project, id).await?;
      require_github_manager(can_manage, id)?;
@@ -1063,12 +1064,12 @@ index 9be9c4f..8632cc0 100644
          .database()
          .immediate_transaction()
          .await
-         .map_err(|_| ApiError::internal(id))?;
+         .map_err(|error| ApiError::internal(id).cause(error))?;
 +    check_github_binding_tx(&state, &mut tx, id).await?;
      let removed = sqlx::query(
          "DELETE FROM github_project_connections WHERE workspace_id = $1 AND project_id = $2",
      )
-@@ -569,6 +617,7 @@ pub(crate) async fn start_github_manifest(
+@@ -576,6 +624,7 @@ pub(crate) async fn start_github_manifest(
      app_key(settings, id)?;
      let (_, can_manage) = github_workspace_access(&state, &headers, &workspace, id).await?;
      require_github_manager(can_manage, id)?;
@@ -1076,7 +1077,7 @@ index 9be9c4f..8632cc0 100644
      let origin = github_registration_origin(settings, &headers, id)?;
      let organization = body.organization.as_deref().unwrap_or("").trim();
      if !organization.is_empty()
-@@ -604,22 +653,29 @@ pub(crate) async fn start_github_manifest(
+@@ -611,22 +660,29 @@ pub(crate) async fn start_github_manifest(
      }
      let token = generate_opaque_token();
      let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
@@ -1092,12 +1093,12 @@ index 9be9c4f..8632cc0 100644
 -        .execute(state.tasks.database().pool())
 +        .execute(&mut *tx)
          .await
-         .map_err(|_| ApiError::internal(id))?;
+         .map_err(|error| ApiError::internal(id).cause(error))?;
      sqlx::query("INSERT INTO github_app_registrations (state_hash, workspace_id, expires_at, public_origin) VALUES ($1, $2, $3, $4) ON CONFLICT(workspace_id) DO UPDATE SET state_hash = excluded.state_hash, expires_at = excluded.expires_at, public_origin = excluded.public_origin")
           .bind(hash.to_vec()).bind(&workspace).bind(TimestampMillis::now().as_millis() + 3_600_000).bind(&origin)
--        .execute(state.tasks.database().pool()).await.map_err(|_| ApiError::internal(id))?;
-+        .execute(&mut *tx).await.map_err(|_| ApiError::internal(id))?;
-+    tx.commit().await.map_err(|_| ApiError::internal(id))?;
+-        .execute(state.tasks.database().pool()).await.map_err(|error| ApiError::internal(id).cause(error))?;
++        .execute(&mut *tx).await.map_err(|error| ApiError::internal(id).cause(error))?;
++    tx.commit().await.map_err(|error| ApiError::internal(id).cause(error))?;
      Ok(Json(GithubManifestStart {
 -        action: if organization.is_empty() {
 -            format!("https://github.com/settings/apps/new?state={token}")
@@ -1115,7 +1116,7 @@ index 9be9c4f..8632cc0 100644
          manifest: serde_json::json!({
              "name": "Orbit",
              "url": origin,
-@@ -659,6 +715,7 @@ pub(crate) async fn github_manifest_callback(
+@@ -666,6 +722,7 @@ pub(crate) async fn github_manifest_callback(
      })?;
      let settings = github_settings_context(&state, id)?;
      let key = app_key(settings, id)?;
@@ -1123,7 +1124,7 @@ index 9be9c4f..8632cc0 100644
      if query.state.len() > 200 || query.code.len() > 200 || query.code.is_empty() {
          return Err(ApiError::new(
              StatusCode::BAD_REQUEST,
-@@ -688,12 +745,16 @@ pub(crate) async fn github_manifest_callback(
+@@ -695,12 +752,16 @@ pub(crate) async fn github_manifest_callback(
      })?;
      let workspace: String = pending.get("workspace_id");
      let registered_origin: String = pending.get("public_origin");
@@ -1144,15 +1145,15 @@ index 9be9c4f..8632cc0 100644
          .header("User-Agent", "Orbit")
          .header("Accept", "application/vnd.github+json")
          .header("X-GitHub-Api-Version", "2022-11-28")
-@@ -758,6 +819,7 @@ async fn store_github_app(
+@@ -766,6 +827,7 @@ async fn store_github_app(
          .immediate_transaction()
          .await
-         .map_err(|_| ApiError::internal(id))?;
+         .map_err(|error| ApiError::internal(id).cause(error))?;
 +    check_github_binding_tx(state, &mut tx, id).await?;
      let consumed = sqlx::query("DELETE FROM github_app_registrations WHERE state_hash = $1 AND workspace_id = $2 AND expires_at > $3")
          .bind(hash.to_vec()).bind(workspace).bind(TimestampMillis::now().as_millis())
-         .execute(&mut *tx).await.map_err(|_| ApiError::internal(id))?;
-@@ -813,6 +875,7 @@ async fn github_webhook_from_database(
+         .execute(&mut *tx).await.map_err(|error| ApiError::internal(id).cause(error))?;
+@@ -823,6 +885,7 @@ async fn github_webhook_from_database(
  ) -> Result<StatusCode, ApiError> {
      let request_id = request.extensions().get::<RequestId>().cloned();
      let id = request_id.as_ref();
@@ -1160,15 +1161,15 @@ index 9be9c4f..8632cc0 100644
      if request
          .headers()
          .get("x-github-event")
-@@ -1017,6 +1080,7 @@ async fn github_webhook_from_database(
+@@ -1029,6 +1092,7 @@ async fn github_webhook_from_database(
                  .immediate_transaction()
                  .await
-                 .map_err(|_| ApiError::internal(id))?;
+                 .map_err(|error| ApiError::internal(id).cause(error))?;
 +            check_github_binding_tx(state, &mut tx, id).await?;
              let paused = sqlx::query("UPDATE github_issue_links SET sync_paused = 1 WHERE workspace_id = $1 AND repository = $2 AND issue_number = $3 AND kind = $4 AND sync_paused = 0")
                  .bind(&workspace).bind(repository).bind(number).bind(kind)
-                 .execute(&mut *tx).await.map_err(|_| ApiError::internal(id))?;
-@@ -1078,6 +1142,7 @@ async fn github_webhook_from_database(
+                 .execute(&mut *tx).await.map_err(|error| ApiError::internal(id).cause(error))?;
+@@ -1094,6 +1158,7 @@ async fn github_webhook_from_database(
      } else {
          "open"
      };
@@ -1176,15 +1177,15 @@ index 9be9c4f..8632cc0 100644
      let synced = state
          .tasks
          .sync_github_work_item(
-@@ -1156,6 +1221,7 @@ async fn update_github_installation(
+@@ -1176,6 +1241,7 @@ async fn update_github_installation(
          .immediate_transaction()
          .await
-         .map_err(|_| ApiError::internal(request_id))?;
+         .map_err(|error| ApiError::internal(request_id).cause(error))?;
 +    check_github_binding_tx(state, &mut tx, request_id).await?;
      let mut changed = false;
      if event == "installation" && action == "deleted" {
          changed |= sqlx::query(
-@@ -1679,6 +1745,9 @@ mod tests {
+@@ -1714,6 +1780,9 @@ mod tests {
              Arc::new(ApiTokenRepository::new((*database).clone())),
              Arc::new(TaskRepository::new((*database).clone())),
          );
@@ -1195,7 +1196,7 @@ index 9be9c4f..8632cc0 100644
          sqlx::query("INSERT INTO github_app_registrations (state_hash, workspace_id, expires_at) VALUES ($1, $2, $3)")
               .bind(hash.to_vec()).bind(setup.workspace_id.to_string())
 diff --git a/apps/server/src/lib.rs b/apps/server/src/lib.rs
-index 0546d30..e0b5d04 100644
+index 75f967df..96a419bd 100644
 --- a/apps/server/src/lib.rs
 +++ b/apps/server/src/lib.rs
 @@ -13,6 +13,7 @@ pub mod database_routes;
@@ -1207,10 +1208,10 @@ index 0546d30..e0b5d04 100644
  pub mod import_notice;
  pub mod import_people;
 diff --git a/apps/server/src/repositories/sign_in_providers.rs b/apps/server/src/repositories/sign_in_providers.rs
-index d003179..6668cf6 100644
+index fbef56d5..877aefc7 100644
 --- a/apps/server/src/repositories/sign_in_providers.rs
 +++ b/apps/server/src/repositories/sign_in_providers.rs
-@@ -178,6 +178,19 @@ async fn identity_owner(
+@@ -179,6 +179,19 @@ async fn identity_owner(
          .transpose()
  }
  
@@ -1230,7 +1231,7 @@ index d003179..6668cf6 100644
  async fn has_provider(
      transaction: &mut Transaction<'_, Any>,
      user_id: Id,
-@@ -233,10 +246,12 @@ impl IdentityRepository {
+@@ -234,10 +247,12 @@ impl IdentityRepository {
      pub async fn provider_account(
          &self,
          profile: &ProviderProfile,
@@ -1243,7 +1244,7 @@ index d003179..6668cf6 100644
          let owner = identity_owner(&mut transaction, profile.provider, &profile.subject).await?;
          let email_account = match (&owner, &profile.verified_email) {
              (None, Some(email)) => {
-@@ -348,11 +363,13 @@ impl IdentityRepository {
+@@ -345,11 +360,13 @@ impl IdentityRepository {
          &self,
          user: &AuthenticatedUser,
          profile: &ProviderProfile,
@@ -1257,7 +1258,7 @@ index d003179..6668cf6 100644
          let active = sqlx::query_scalar::<_, i64>(
              "SELECT COUNT(*) FROM users WHERE id = $1 AND suspended_at IS NULL",
          )
-@@ -413,10 +430,12 @@ impl IdentityRepository {
+@@ -410,10 +427,12 @@ impl IdentityRepository {
          &self,
          user_id: Id,
          profile: &ProviderProfile,
@@ -1270,7 +1271,7 @@ index d003179..6668cf6 100644
          match identity_owner(&mut transaction, profile.provider, &profile.subject).await? {
              Some(owner) if owner == user_id => return Ok(()),
              Some(_) => return Err(IdentityChangeError::InUse),
-@@ -445,10 +464,12 @@ impl IdentityRepository {
+@@ -442,10 +461,12 @@ impl IdentityRepository {
          session_id: Id,
          user_id: Id,
          profile: &ProviderProfile,
@@ -1283,7 +1284,7 @@ index d003179..6668cf6 100644
          if identity_owner(&mut transaction, profile.provider, &profile.subject).await?
              != Some(user_id)
          {
-@@ -505,10 +526,12 @@ impl IdentityRepository {
+@@ -502,10 +523,12 @@ impl IdentityRepository {
          &self,
          user_id: Id,
          provider: Provider,
@@ -1296,7 +1297,7 @@ index d003179..6668cf6 100644
          let deleted =
              sqlx::query("DELETE FROM user_identities WHERE user_id = $1 AND provider = $2")
                  .bind(user_id.to_string())
-@@ -599,16 +622,23 @@ impl InstanceSettingsRepository {
+@@ -602,16 +625,23 @@ impl InstanceSettingsRepository {
      }
  
      /// Saves the OAuth client. `client_secret: None` keeps the saved secret.
@@ -1320,7 +1321,7 @@ index d003179..6668cf6 100644
          match client_secret {
              Some(secret) => {
                  sqlx::query(
-@@ -660,10 +690,16 @@ impl InstanceSettingsRepository {
+@@ -663,10 +693,16 @@ impl InstanceSettingsRepository {
          &self,
          actor_id: Id,
          provider: Provider,
@@ -1338,11 +1339,11 @@ index d003179..6668cf6 100644
              .bind(provider.as_str())
              .execute(&mut *transaction)
 diff --git a/apps/server/src/repositories/tasks.rs b/apps/server/src/repositories/tasks.rs
-index 411e5bc..e6f6f0c 100644
+index 4aaee13e..c5e4347a 100644
 --- a/apps/server/src/repositories/tasks.rs
 +++ b/apps/server/src/repositories/tasks.rs
 @@ -1,6 +1,8 @@
- use orbit_domain::{Actor, DEFAULT_STATUSES, StatusCategory};
+ use orbit_domain::{Actor, DEFAULT_STATUSES, Permission, StatusCategory};
  use orbit_platform::SqlBuilder;
 -use orbit_platform::{BLOB_REFERENCE_COUNT, Backend, Database, Flag, Id, Row, TimestampMillis};
 +use orbit_platform::{
@@ -1351,7 +1352,7 @@ index 411e5bc..e6f6f0c 100644
  use serde::{Deserialize, Serialize};
  use serde_json::{Value, json};
  use sha2::{Digest, Sha256};
-@@ -474,6 +476,10 @@ pub enum TaskError {
+@@ -568,6 +570,10 @@ pub enum TaskError {
      TrialLimit(TrialLimitReached),
  }
  
@@ -1362,7 +1363,7 @@ index 411e5bc..e6f6f0c 100644
  impl From<TrialCapacityError> for TaskError {
      fn from(error: TrialCapacityError) -> Self {
          match error {
-@@ -519,6 +525,7 @@ pub struct TokenActor {
+@@ -613,6 +619,7 @@ pub struct TokenActor {
  #[derive(Clone)]
  pub struct TaskRepository {
      database: Database,
@@ -1370,7 +1371,7 @@ index 411e5bc..e6f6f0c 100644
      project_grant: Option<Vec<Id>>,
      token: Option<TokenActor>,
      /// `expected_version` of task updates and deletes is the task's [`revision`].
-@@ -526,6 +533,17 @@ pub struct TaskRepository {
+@@ -622,6 +629,17 @@ pub struct TaskRepository {
  }
  
  impl TaskRepository {
@@ -1388,7 +1389,7 @@ index 411e5bc..e6f6f0c 100644
      pub fn with_project_grant(&self, projects: Vec<Id>) -> Self {
          Self {
              project_grant: Some(projects),
-@@ -720,6 +738,7 @@ impl TaskRepository {
+@@ -825,6 +843,7 @@ impl TaskRepository {
      pub fn new(database: Database) -> Self {
          Self {
              database,
@@ -1396,7 +1397,7 @@ index 411e5bc..e6f6f0c 100644
              project_grant: None,
              token: None,
              revisions: false,
-@@ -2106,6 +2125,9 @@ impl TaskRepository {
+@@ -2302,6 +2321,9 @@ impl TaskRepository {
          request_id: &str,
          now: TimestampMillis,
      ) -> Result<Id, TaskError> {
@@ -1406,7 +1407,7 @@ index 411e5bc..e6f6f0c 100644
          // A linked task's live description is replaced with the issue body in the transaction
          // below; its room is locked first.
          let linked: Option<String> = sqlx::query_scalar(
-@@ -2126,6 +2148,9 @@ impl TaskRepository {
+@@ -2322,6 +2344,9 @@ impl TaskRepository {
              None => None,
          };
          let mut tx = self.database.immediate_transaction().await?;
@@ -1414,9 +1415,9 @@ index 411e5bc..e6f6f0c 100644
 +            .await
 +            .map_err(github_binding_error)?;
          require_access_tx(&mut tx, workspace_id, actor_id).await?;
-         let (service_account_id, service_account_name) =
-             github_service_account_in_tx(&mut tx, workspace_id, actor_id, now).await?;
-@@ -2135,24 +2160,31 @@ impl TaskRepository {
+         // The repository's connection chose the project; the sync runs for it, not for a reader.
+         let scope = ProjectScope::All;
+@@ -2333,24 +2358,31 @@ impl TaskRepository {
                  .bind(workspace_id.to_string()).bind(&issue.repository).bind(issue.number)
                  .execute(&mut *tx).await?;
          }
@@ -1457,7 +1458,7 @@ index 411e5bc..e6f6f0c 100644
              let task_id = parse_id(row.get("task_id"))?;
              if was_deleted {
 diff --git a/apps/server/src/repositories/two_factor.rs b/apps/server/src/repositories/two_factor.rs
-index f7c4535..d653f80 100644
+index f7c45359..d653f80a 100644
 --- a/apps/server/src/repositories/two_factor.rs
 +++ b/apps/server/src/repositories/two_factor.rs
 @@ -230,7 +230,18 @@ impl IdentityRepository {
@@ -1510,10 +1511,10 @@ index f7c4535..d653f80 100644
          // replaced, so nobody loses their codes. Drop the second hash once no such rows are left.
          let used = sqlx::query(
 diff --git a/apps/server/src/router.rs b/apps/server/src/router.rs
-index 66edca2..8367d51 100644
+index 3d487d4e..39b36c2b 100644
 --- a/apps/server/src/router.rs
 +++ b/apps/server/src/router.rs
-@@ -34,6 +34,7 @@ use crate::workspace_export_routes::{WorkspaceExportState, workspace_export_rout
+@@ -35,6 +35,7 @@ use crate::workspace_export_routes::{WorkspaceExportState, workspace_export_rout
  use crate::workspace_routes::{WorkspaceState, workspace_router};
  
  pub struct ApiRoutes {
@@ -1521,7 +1522,7 @@ index 66edca2..8367d51 100644
      /// Orbit Cloud billing: its routes and the read-only guard. `None` on a self-hosted server.
      pub billing: Option<crate::billing::Billing>,
      pub mcp: Router,
-@@ -71,6 +72,7 @@ pub fn production_router(
+@@ -74,6 +75,7 @@ pub fn production_router(
      rate_limits: RateLimitConfig,
      require_secure_transport: bool,
  ) -> Router {
@@ -1529,7 +1530,7 @@ index 66edca2..8367d51 100644
      let csp_script_hash = assets.csp_script_hash().to_owned();
      let session_cookie = api.auth.cookie_mode().session_cookie_name();
      let database = api.auth.database().clone();
-@@ -136,6 +138,7 @@ pub fn production_router(
+@@ -141,6 +143,7 @@ pub fn production_router(
              .with_rate_limits(rate_limits)
              .with_session_cookie(session_cookie)
              .with_shared_rate_limits(database)
@@ -1538,10 +1539,10 @@ index 66edca2..8367d51 100644
          if require_secure_transport {
              layer.require_secure_transport()
 diff --git a/apps/server/src/sign_in_providers.rs b/apps/server/src/sign_in_providers.rs
-index 1e060c2..9d90f3f 100644
+index a4d6f71e..c0d7c80f 100644
 --- a/apps/server/src/sign_in_providers.rs
 +++ b/apps/server/src/sign_in_providers.rs
-@@ -83,6 +83,16 @@ impl Default for ProviderEndpoints {
+@@ -89,6 +89,16 @@ impl Default for ProviderEndpoints {
  }
  
  impl ProviderEndpoints {
@@ -1558,7 +1559,7 @@ index 1e060c2..9d90f3f 100644
      /// Every endpoint under `base`: `{base}/google/authorize`, `/google/token`, `/google/userinfo`,
      /// `/github/authorize`, `/github/token`, and the GitHub API at `{base}/github/api/`.
      #[must_use]
-@@ -193,6 +203,10 @@ impl Default for ProviderClient {
+@@ -199,6 +209,10 @@ impl Default for ProviderClient {
  }
  
  impl ProviderClient {
@@ -1569,7 +1570,7 @@ index 1e060c2..9d90f3f 100644
      #[must_use]
      pub fn new(endpoints: ProviderEndpoints) -> Self {
          let http = reqwest::Client::builder()
-@@ -422,6 +436,33 @@ struct GithubEmail {
+@@ -581,6 +595,33 @@ struct GithubEmail {
  mod tests {
      use super::*;
  
@@ -1604,10 +1605,10 @@ index 1e060c2..9d90f3f 100644
      fn pkce_challenge_matches_the_rfc_7636_example() {
          assert_eq!(
 diff --git a/apps/server/src/task_routes.rs b/apps/server/src/task_routes.rs
-index afc7eef..a989cb2 100644
+index e7a3f5df..4612e1e8 100644
 --- a/apps/server/src/task_routes.rs
 +++ b/apps/server/src/task_routes.rs
-@@ -1363,22 +1363,60 @@ pub(crate) async fn list_github_links(
+@@ -1922,22 +1922,60 @@ pub(crate) async fn list_github_links(
          .get_task(workspace_id, task_id, actor_id)
          .await
          .map_err(|error| task_problem(error, instance.clone(), request_id.as_ref()))?;
@@ -1682,10 +1683,10 @@ index afc7eef..a989cb2 100644
  
  #[utoipa::path(get, path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/activity", params(PageQuery, ("workspace_id" = String, Path), ("task_id" = String, Path)), responses((status = 200, body = Page<crate::audit::AuditEvent>)))]
 diff --git a/apps/server/src/workspace_routes.rs b/apps/server/src/workspace_routes.rs
-index e2557cb..ee58cca 100644
+index 89715659..68e8c14b 100644
 --- a/apps/server/src/workspace_routes.rs
 +++ b/apps/server/src/workspace_routes.rs
-@@ -64,6 +64,7 @@ pub struct WorkspaceState {
+@@ -66,6 +66,7 @@ pub struct WorkspaceState {
      image_compressor: Option<ImageCompressor>,
      /// Deletes stored files for workspace admins; `None` refuses to.
      uploads: Option<UploadService>,
@@ -1693,7 +1694,7 @@ index e2557cb..ee58cca 100644
  }
  
  /// Open registration is throttled like sign-in, on every server of the database.
-@@ -97,6 +98,7 @@ impl WorkspaceState {
+@@ -99,6 +100,7 @@ impl WorkspaceState {
              object_storage: None,
              image_compressor: None,
              uploads: None,
@@ -1701,7 +1702,7 @@ index e2557cb..ee58cca 100644
          }
      }
  
-@@ -124,9 +126,16 @@ impl WorkspaceState {
+@@ -126,9 +128,16 @@ impl WorkspaceState {
              object_storage: None,
              image_compressor: None,
              uploads: None,
@@ -1718,7 +1719,7 @@ index e2557cb..ee58cca 100644
      #[must_use]
      pub fn with_mailer(mut self, mailer: Mailer) -> Self {
          self.mailer = Some(mailer);
-@@ -2426,6 +2435,7 @@ async fn save_sign_in_provider(
+@@ -2883,6 +2892,7 @@ async fn save_sign_in_provider(
          .save_sign_in_provider(
              session.user.id,
              provider,
@@ -1726,7 +1727,7 @@ index e2557cb..ee58cca 100644
              client_id,
              encrypted,
              request_id_value(rid),
-@@ -2458,6 +2468,7 @@ async fn remove_sign_in_provider(
+@@ -2916,6 +2926,7 @@ async fn remove_sign_in_provider(
          .remove_sign_in_provider(
              session.user.id,
              provider,
@@ -1736,7 +1737,7 @@ index e2557cb..ee58cca 100644
          )
 diff --git a/apps/server/tests/github_upgrade_handoff.rs b/apps/server/tests/github_upgrade_handoff.rs
 new file mode 100644
-index 0000000..23c599c
+index 00000000..23c599cd
 --- /dev/null
 +++ b/apps/server/tests/github_upgrade_handoff.rs
 @@ -0,0 +1,176 @@
@@ -1917,7 +1918,7 @@ index 0000000..23c599c
 +    }
 +}
 diff --git a/apps/server/tests/integrations_api.rs b/apps/server/tests/integrations_api.rs
-index a6303e1..ca0ffca 100644
+index 1264c490..9443fa93 100644
 --- a/apps/server/tests/integrations_api.rs
 +++ b/apps/server/tests/integrations_api.rs
 @@ -19,6 +19,69 @@ use serde_json::{Value, json};
@@ -1990,7 +1991,7 @@ index a6303e1..ca0ffca 100644
  #[tokio::test]
  async fn database_github_app_routes_issues_without_orbit_tokens() {
      let fixture = fixture().await;
-@@ -1775,6 +1838,9 @@ struct Fixture {
+@@ -1777,6 +1840,9 @@ struct Fixture {
  
  async fn fixture() -> Fixture {
      let database = TestDatabase::new().await.unwrap();
@@ -2001,10 +2002,10 @@ index a6303e1..ca0ffca 100644
      let now = TimestampMillis::now();
      identity
 diff --git a/apps/server/tests/sign_in_providers_api.rs b/apps/server/tests/sign_in_providers_api.rs
-index 0b7c934..2079bfe 100644
+index e7a00477..eadb11b0 100644
 --- a/apps/server/tests/sign_in_providers_api.rs
 +++ b/apps/server/tests/sign_in_providers_api.rs
-@@ -224,6 +224,9 @@ struct Fixture {
+@@ -272,6 +272,9 @@ struct Fixture {
  impl Fixture {
      async fn new() -> Self {
          let database = TestDatabase::new().await.unwrap();
@@ -2014,7 +2015,7 @@ index 0b7c934..2079bfe 100644
          let identity = Arc::new(IdentityRepository::new((*database).clone()));
          let now = TimestampMillis::now();
          identity
-@@ -434,6 +437,218 @@ fn web_handoff(location: &str) -> String {
+@@ -483,6 +486,218 @@ fn web_handoff(location: &str) -> String {
          .into_owned()
  }
  
@@ -2234,7 +2235,7 @@ index 0b7c934..2079bfe 100644
  async fn admin_saves_providers_with_an_encrypted_secret_that_an_empty_save_keeps() {
      let fixture = Fixture::new().await;
 diff --git a/apps/server/tests/tasks_api.rs b/apps/server/tests/tasks_api.rs
-index 3f00d9a..9e685b9 100644
+index 3292d796..a2e2f36f 100644
 --- a/apps/server/tests/tasks_api.rs
 +++ b/apps/server/tests/tasks_api.rs
 @@ -30,6 +30,9 @@ struct Fixture {
@@ -2369,7 +2370,7 @@ index 3f00d9a..9e685b9 100644
  async fn github_issue_link_reports_paused_sync_state() {
      let fixture = Fixture::new().await;
 diff --git a/apps/server/tests/two_factor_api.rs b/apps/server/tests/two_factor_api.rs
-index 65a4233..9b0aff0 100644
+index 65a42333..9b0aff02 100644
 --- a/apps/server/tests/two_factor_api.rs
 +++ b/apps/server/tests/two_factor_api.rs
 @@ -27,6 +27,9 @@ impl Fixture {
@@ -2383,10 +2384,10 @@ index 65a4233..9b0aff0 100644
          let now = TimestampMillis::now();
          identity
 diff --git a/crates/platform/src/config.rs b/crates/platform/src/config.rs
-index efe13a2..6acff38 100644
+index 80b9962b..304dca75 100644
 --- a/crates/platform/src/config.rs
 +++ b/crates/platform/src/config.rs
-@@ -12,6 +12,7 @@ use thiserror::Error;
+@@ -18,6 +18,7 @@ pub use instance::{
  
  const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
  const HTTP_PORT_ENV: &str = "ORBIT_PORT";
@@ -2394,7 +2395,7 @@ index efe13a2..6acff38 100644
  const HTTP_BIND_ENV: &str = "ORBIT_BIND";
  const HTTP_PUBLIC_ORIGIN_ENV: &str = "ORBIT_PUBLIC_ORIGIN";
  const HTTP_TRUSTED_PROXIES_ENV: &str = "ORBIT_TRUSTED_PROXIES";
-@@ -54,6 +55,7 @@ const IGNORED_ENV_PREFIXES: [&str; 2] = ["ORBIT_DEV_", "ORBIT_TEST_"];
+@@ -77,6 +78,7 @@ const IGNORED_ENV_PREFIXES: [&str; 2] = ["ORBIT_DEV_", "ORBIT_TEST_"];
  
  #[derive(Clone, Debug, Default, Eq, PartialEq)]
  pub struct Config {
@@ -2402,7 +2403,7 @@ index efe13a2..6acff38 100644
      pub environment: EnvironmentMode,
      pub http: HttpConfig,
      pub data: DataConfig,
-@@ -966,6 +968,13 @@ fn apply_environment(
+@@ -1146,6 +1148,13 @@ fn apply_environment(
      for (key, value) in environment {
          if key == ENVIRONMENT_ENV {
              config.environment = parse_environment(key, value)?;
@@ -2416,7 +2417,7 @@ index efe13a2..6acff38 100644
          } else if key == HTTP_PORT_ENV {
              config.http.port = value.parse().map_err(|_| ConfigError::InvalidEnvironment {
                  key: key.clone(),
-@@ -1241,6 +1250,25 @@ mod tests {
+@@ -1471,6 +1480,25 @@ mod tests {
          assert!(error.to_string().contains("worbit.env:2"));
      }
  
@@ -2444,7 +2445,7 @@ index efe13a2..6acff38 100644
          let config = production(&[("ORBIT_METRICS_LISTEN", "127.0.0.1:9090")]);
 diff --git a/crates/platform/src/github.rs b/crates/platform/src/github.rs
 new file mode 100644
-index 0000000..6b5c716
+index 00000000..6b5c7165
 --- /dev/null
 +++ b/crates/platform/src/github.rs
 @@ -0,0 +1,269 @@
@@ -2718,19 +2719,19 @@ index 0000000..6b5c716
 +    }
 +}
 diff --git a/crates/platform/src/http/mod.rs b/crates/platform/src/http/mod.rs
-index 50f93fc..1131727 100644
+index 77b39801..a47402e8 100644
 --- a/crates/platform/src/http/mod.rs
 +++ b/crates/platform/src/http/mod.rs
-@@ -16,7 +16,7 @@ use axum::http::{Request, Response, StatusCode};
- use axum::response::Response as AxumResponse;
+@@ -17,7 +17,7 @@ use axum::response::Response as AxumResponse;
  use tower::{Layer, Service};
+ use tracing::Instrument;
  
 -use crate::{Database, Problem, RateLimitConfig};
 +use crate::{Database, GitHubHost, Problem, RateLimitConfig};
  use rate_limit::RateLimiter;
  
  pub use limits::{HttpLimits, LargeUpload};
-@@ -31,6 +31,7 @@ pub struct HttpPlatformLayer {
+@@ -37,6 +37,7 @@ pub struct HttpPlatformLayer {
      limits: HttpLimits,
      contract_id: Option<String>,
      csp_script_hash: Option<String>,
@@ -2738,7 +2739,7 @@ index 50f93fc..1131727 100644
      rate_limiter: RateLimiter,
      secure_transport_required: bool,
  }
-@@ -43,6 +44,7 @@ impl HttpPlatformLayer {
+@@ -49,6 +50,7 @@ impl HttpPlatformLayer {
              limits: HttpLimits::default(),
              contract_id: None,
              csp_script_hash: None,
@@ -2746,7 +2747,7 @@ index 50f93fc..1131727 100644
              rate_limiter: RateLimiter::default(),
              secure_transport_required: false,
          }
-@@ -66,6 +68,13 @@ impl HttpPlatformLayer {
+@@ -72,6 +74,13 @@ impl HttpPlatformLayer {
          self
      }
  
@@ -2760,7 +2761,7 @@ index 50f93fc..1131727 100644
      #[must_use]
      pub fn with_rate_limits(mut self, config: RateLimitConfig) -> Self {
          self.rate_limiter = self.rate_limiter.with_config(config);
-@@ -104,6 +113,7 @@ impl<S> Layer<S> for HttpPlatformLayer {
+@@ -110,6 +119,7 @@ impl<S> Layer<S> for HttpPlatformLayer {
              limits: self.limits,
              contract_id: self.contract_id.clone(),
              csp_script_hash: self.csp_script_hash.clone(),
@@ -2768,7 +2769,7 @@ index 50f93fc..1131727 100644
              rate_limiter: self.rate_limiter.clone(),
              secure_transport_required: self.secure_transport_required,
              readiness: InnerReadiness::Checking,
-@@ -125,6 +135,7 @@ pub struct HttpPlatformService<S> {
+@@ -131,6 +141,7 @@ pub struct HttpPlatformService<S> {
      limits: HttpLimits,
      contract_id: Option<String>,
      csp_script_hash: Option<String>,
@@ -2776,7 +2777,7 @@ index 50f93fc..1131727 100644
      rate_limiter: RateLimiter,
      secure_transport_required: bool,
      readiness: InnerReadiness,
-@@ -138,6 +149,7 @@ impl<S: Clone> Clone for HttpPlatformService<S> {
+@@ -144,6 +155,7 @@ impl<S: Clone> Clone for HttpPlatformService<S> {
              limits: self.limits,
              contract_id: self.contract_id.clone(),
              csp_script_hash: self.csp_script_hash.clone(),
@@ -2784,7 +2785,7 @@ index 50f93fc..1131727 100644
              rate_limiter: self.rate_limiter.clone(),
              secure_transport_required: self.secure_transport_required,
              readiness: InnerReadiness::Checking,
-@@ -180,6 +192,7 @@ where
+@@ -186,6 +198,7 @@ where
          let limits = self.limits;
          let contract_id = self.contract_id.clone();
          let csp_script_hash = self.csp_script_hash.clone();
@@ -2792,7 +2793,7 @@ index 50f93fc..1131727 100644
          let rate_limiter = self.rate_limiter.clone();
          let secure_transport_required = self.secure_transport_required;
  
-@@ -205,6 +218,7 @@ where
+@@ -211,6 +224,7 @@ where
                          &request_id,
                          false,
                          csp_script_hash.as_deref(),
@@ -2800,7 +2801,7 @@ index 50f93fc..1131727 100644
                      ));
                  }
              };
-@@ -222,6 +236,7 @@ where
+@@ -228,6 +242,7 @@ where
                      &request_id,
                      false,
                      csp_script_hash.as_deref(),
@@ -2808,7 +2809,7 @@ index 50f93fc..1131727 100644
                  ));
              }
  
-@@ -238,6 +253,7 @@ where
+@@ -244,6 +259,7 @@ where
                      &request_id,
                      transport.is_secure(),
                      csp_script_hash.as_deref(),
@@ -2816,7 +2817,7 @@ index 50f93fc..1131727 100644
                  ));
              }
  
-@@ -259,6 +275,7 @@ where
+@@ -265,6 +281,7 @@ where
                      &request_id,
                      transport.is_secure(),
                      csp_script_hash.as_deref(),
@@ -2824,7 +2825,7 @@ index 50f93fc..1131727 100644
                  ));
              }
  
-@@ -290,6 +307,7 @@ where
+@@ -296,6 +313,7 @@ where
                          &request_id,
                          transport.is_secure(),
                          csp_script_hash.as_deref(),
@@ -2832,7 +2833,7 @@ index 50f93fc..1131727 100644
                      ));
                  }
              };
-@@ -300,6 +318,7 @@ where
+@@ -306,6 +324,7 @@ where
                      &request_id,
                      transport.is_secure(),
                      csp_script_hash.as_deref(),
@@ -2840,7 +2841,7 @@ index 50f93fc..1131727 100644
                  ));
              }
  
-@@ -314,6 +333,7 @@ where
+@@ -320,6 +339,7 @@ where
                      &request_id,
                      transport.is_secure(),
                      csp_script_hash.as_deref(),
@@ -2848,7 +2849,7 @@ index 50f93fc..1131727 100644
                  ));
              }
  
-@@ -352,6 +372,7 @@ where
+@@ -375,6 +395,7 @@ where
                              &request_id,
                              transport.is_secure(),
                              csp_script_hash.as_deref(),
@@ -2856,7 +2857,7 @@ index 50f93fc..1131727 100644
                          ));
                      }
                  },
-@@ -370,6 +391,7 @@ where
+@@ -395,6 +416,7 @@ where
                          &request_id,
                          transport.is_secure(),
                          csp_script_hash.as_deref(),
@@ -2864,7 +2865,7 @@ index 50f93fc..1131727 100644
                      ));
                  }
              };
-@@ -391,6 +413,7 @@ where
+@@ -441,6 +463,7 @@ where
                  &request_id,
                  transport.is_secure(),
                  csp_script_hash.as_deref(),
@@ -2872,7 +2873,7 @@ index 50f93fc..1131727 100644
              ))
          })
      }
-@@ -454,13 +477,19 @@ fn finish_response(
+@@ -504,13 +527,19 @@ fn finish_response(
      request_id: &RequestId,
      secure: bool,
      csp_script_hash: Option<&str>,
@@ -2894,7 +2895,7 @@ index 50f93fc..1131727 100644
  }
  
 diff --git a/crates/platform/src/http/security.rs b/crates/platform/src/http/security.rs
-index 42781eb..e7e829a 100644
+index c271995b..28f5b62d 100644
 --- a/crates/platform/src/http/security.rs
 +++ b/crates/platform/src/http/security.rs
 @@ -9,6 +9,7 @@ use axum::http::{HeaderMap, Method, Uri};
@@ -2905,7 +2906,7 @@ index 42781eb..e7e829a 100644
  
  const X_FORWARDED_FOR: &str = "x-forwarded-for";
  const X_FORWARDED_PROTO: &str = "x-forwarded-proto";
-@@ -280,6 +281,7 @@ pub(crate) fn add_security_headers(
+@@ -284,6 +285,7 @@ pub(crate) fn add_security_headers(
      headers: &mut HeaderMap,
      secure: bool,
      csp_script_hash: Option<&str>,
@@ -2913,7 +2914,7 @@ index 42781eb..e7e829a 100644
  ) {
      let script_source = csp_script_hash
          .map(|hash| format!("script-src 'self' '{hash}'; "))
-@@ -288,8 +290,9 @@ pub(crate) fn add_security_headers(
+@@ -292,8 +294,9 @@ pub(crate) fn add_security_headers(
      // plugin creates and then fills through the CSSOM (`insertRule`), which CSP does not restrict.
      // `frame-src` `blob:` is the PDF preview (the file URL itself cannot be framed). Vimeo joins YouTube.
      // `media-src` `https:` lets a document play an audio or video file the page links to.
@@ -2922,9 +2923,9 @@ index 42781eb..e7e829a 100644
 -        "default-src 'self'; {script_source}style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; frame-src blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' https://github.com"
 +        "default-src 'self'; {script_source}style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; frame-src blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' {github_origin}"
      );
-     headers.insert(
-         CONTENT_SECURITY_POLICY,
-@@ -348,7 +351,7 @@ mod tests {
+     // A handler that sets its own policy keeps it (the sandboxed mail view document).
+     let handler_policy = headers.contains_key(CONTENT_SECURITY_POLICY);
+@@ -361,7 +364,7 @@ mod tests {
      #[test]
      fn responses_refuse_framing_and_isolate_the_opener() {
          let mut headers = HeaderMap::new();
@@ -2934,7 +2935,7 @@ index 42781eb..e7e829a 100644
          assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
      }
 diff --git a/crates/platform/src/lib.rs b/crates/platform/src/lib.rs
-index 192594d..2a51fed 100644
+index 02bea49f..a9954b73 100644
 --- a/crates/platform/src/lib.rs
 +++ b/crates/platform/src/lib.rs
 @@ -5,6 +5,7 @@ mod backup;
@@ -2945,16 +2946,16 @@ index 192594d..2a51fed 100644
  mod health;
  mod http;
  mod id;
-@@ -48,6 +49,7 @@ pub use files::{
-     UploadFinalization, UploadLimitError, UploadLimits, UploadService, WORKSPACE_STORAGE_USED,
-     WorkspaceBucket,
+@@ -52,6 +53,7 @@ pub use files::{
+     StoredObject, TieredBlobStore, UploadError, UploadFinalization, UploadLimitError, UploadLimits,
+     UploadService, WORKSPACE_STORAGE_USED, WorkspaceBucket, shrink_image,
  };
 +pub use github::{GitHubHost, GitHubHostKind, InvalidGitHubHost};
  pub use health::{HealthCheck, HealthCheckResult, HealthRegistry, ReadinessReport};
  pub use http::{
-     ClientIp, HttpLimits, HttpPlatformLayer, LargeUpload, OriginPolicy, RequestId,
+     ClientIp, ErrorCause, HttpLimits, HttpPlatformLayer, LargeUpload, OriginPolicy, RequestId,
 diff --git a/crates/platform/tests/database.rs b/crates/platform/tests/database.rs
-index f1e9f1d..7ea0cce 100644
+index cf40fffe..8ef4e9fa 100644
 --- a/crates/platform/tests/database.rs
 +++ b/crates/platform/tests/database.rs
 @@ -5,6 +5,7 @@ use orbit_platform::{
@@ -2966,7 +2967,7 @@ index f1e9f1d..7ea0cce 100644
  static PROCESS_OWNERSHIP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
  
 diff --git a/crates/platform/tests/http_security.rs b/crates/platform/tests/http_security.rs
-index 19f17d2..024c826 100644
+index 192460ff..04a9c4e7 100644
 --- a/crates/platform/tests/http_security.rs
 +++ b/crates/platform/tests/http_security.rs
 @@ -845,6 +845,30 @@ async fn csp_allows_only_the_verified_bootstrap_hash_and_local_image_variants()
@@ -3001,7 +3002,7 @@ index 19f17d2..024c826 100644
  async fn production_boundary_rejects_requests_without_verified_https_transport() {
      let app = Router::new()
 diff --git a/deploy/.env.example b/deploy/.env.example
-index 1ba5ce9..fe152bb 100644
+index 1ba5ce9b..fe152bb9 100644
 --- a/deploy/.env.example
 +++ b/deploy/.env.example
 @@ -2,5 +2,7 @@ ORBIT_DOMAIN=orbit.example.com
@@ -3013,7 +3014,7 @@ index 1ba5ce9..fe152bb 100644
  # To deploy a published release, set this and use `up -d --no-build`:
  # ORBIT_IMAGE=ghcr.io/OWNER/REPOSITORY:v0.1.0
 diff --git a/deploy/README.md b/deploy/README.md
-index 59c9855..ccedae7 100644
+index 59c98556..ccedae72 100644
 --- a/deploy/README.md
 +++ b/deploy/README.md
 @@ -12,6 +12,8 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --build
@@ -3026,7 +3027,7 @@ index 59c9855..ccedae7 100644
  
  On first startup, retrieve the one-time setup URL locally:
 diff --git a/deploy/compose.yaml b/deploy/compose.yaml
-index f6977fb..8767cf5 100644
+index cdef7da7..55ddd7e5 100644
 --- a/deploy/compose.yaml
 +++ b/deploy/compose.yaml
 @@ -15,6 +15,7 @@ services:
@@ -3034,11 +3035,11 @@ index f6977fb..8767cf5 100644
        ORBIT_TRUSTED_PROXIES: 127.0.0.1/32,172.30.0.2/32
        ORBIT_APP_KEY: ${ORBIT_APP_KEY:?Set ORBIT_APP_KEY in deploy/.env}
 +      ORBIT_GITHUB_URL: ${ORBIT_GITHUB_URL:-https://github.com}
-     volumes:
-       - orbit-data:/var/lib/orbit
-       - orbit-backups:/var/backups/orbit
+       # Mail (see docs/operations.md#mail). Uncomment these lines, the mail port and the certificate volume.
+       # ORBIT_MAIL_ENABLED: 'true'
+       # ORBIT_MAIL_HOSTNAME: mx.example.com
 diff --git a/docs/github.md b/docs/github.md
-index 2b5b850..05654cf 100644
+index 2b5b8505..05654cf6 100644
 --- a/docs/github.md
 +++ b/docs/github.md
 @@ -2,18 +2,34 @@
@@ -3079,18 +3080,18 @@ index 2b5b850..05654cf 100644
  4. Open **Tasks → Project settings → GitHub** and refresh after installation. Select a repository and enter a GitHub label, then save. Create the same label in GitHub. You can connect more projects to the same repository if each project uses a different label. A project has one repository connection.
  5. Add that label to an issue or pull request. Orbit creates one task in the selected project. Later GitHub edits update its title and body; close and reopen events update its status. A merged pull request completes its task. A pull request closed without a merge cancels its task. Reopening it moves the task to unstarted. Removing the label pauses updates, keeps the task, and shows a **GitHub sync paused** badge. Adding the label again resumes updates on the same task. Do not put two configured project labels on one issue or pull request.
 diff --git a/docs/operations.md b/docs/operations.md
-index 285e65a..82e574f 100644
+index 48c75c72..99209e52 100644
 --- a/docs/operations.md
 +++ b/docs/operations.md
-@@ -28,6 +28,7 @@ Orbit reads its configuration only from environment variables that start with `O
- | `ORBIT_RATE_LIMIT_*` | see notes | Request limits and email caps. See [Request limits and email caps](#request-limits-and-email-caps). |
+@@ -31,6 +31,7 @@ Orbit reads its configuration only from environment variables that start with `O
+ | `ORBIT_MAIL_*` | mail off | The SMTP listener that receives mail. See [Mail](#mail). |
  | `ORBIT_APP_KEY` | none | **Required.** The key for saved secrets: base64 of 32 random bytes. |
  | `ORBIT_APP_KEY_FILE` | none | The path of a file that contains the app key, instead of `ORBIT_APP_KEY`. Do not set both. |
 +| `ORBIT_GITHUB_URL` | `https://github.com` | GitHub HTTPS web origin for sign-in and Apps. The database binds to one host; changing hosts is unsupported. See [GitHub host](github.md#github-host). |
  | `ORBIT_CLOUD` | `false` | `true` turns on Stripe billing for Orbit Cloud and requires the three Stripe variables below. See [Billing (Orbit Cloud)](#billing-orbit-cloud). |
  | `ORBIT_STRIPE_SECRET_KEY` | none | The Stripe secret key (`sk_live_…`, or `sk_test_…` for test mode). Only with `ORBIT_CLOUD=true`. |
  | `ORBIT_STRIPE_SECRET_KEY_FILE` | none | The path of a file that contains the Stripe secret key, instead of `ORBIT_STRIPE_SECRET_KEY`. Do not set both. |
-@@ -163,7 +164,7 @@ To create the Google client:
+@@ -224,7 +225,7 @@ To create the Google client:
  
  To create the GitHub client:
  
@@ -3099,10 +3100,10 @@ index 285e65a..82e574f 100644
  2. Set **Homepage URL** to the public origin. Set **Authorization callback URL** to the GitHub callback URL.
  3. Register the app. Generate a client secret.
  4. Copy the client ID and the client secret.
-@@ -203,7 +204,7 @@ A request, a live socket or a co-editing socket can go to any server; sticky ses
+@@ -281,7 +282,7 @@ A request, a live socket or a co-editing socket can go to any server; sticky ses
  ### Deployment
  
- - **Postgres:** one database with failover (a managed service, or Patroni). Connect directly or through a pooler in session mode: Orbit uses advisory locks and `LISTEN`/`NOTIFY`, which a pooler in transaction mode (PgBouncer `pool_mode = transaction`) breaks. Give each server its share of `max_connections` (each server uses its pools plus two connections: the ownership lock and the cluster listener).
+ - **Postgres:** one database with failover (a managed service, or Patroni). Connect directly or through a pooler in session mode: Orbit uses advisory locks and `LISTEN`/`NOTIFY`, which a pooler in transaction mode (PgBouncer `pool_mode = transaction`) breaks. Give each server its share of the Postgres `max_connections`. Set the pool size with `ORBIT_DATABASE_MAX_CONNECTIONS` (default 20). Each server uses up to two times this value, plus one connection for the ownership lock. The cluster listener uses a connection from a pool. A write waits at most 30 seconds for another write to finish. Then it fails, and a background task tries again on its next round.
 -- **Configuration on every server:** the same `ORBIT_DATABASE_URL`, `ORBIT_APP_KEY` and `ORBIT_PUBLIC_ORIGIN`. `ORBIT_TRUSTED_PROXIES` holds the load balancer addresses.
 +- **Configuration on every server:** the same `ORBIT_DATABASE_URL`, `ORBIT_APP_KEY`, `ORBIT_PUBLIC_ORIGIN` and `ORBIT_GITHUB_URL`. `ORBIT_TRUSTED_PROXIES` holds the load balancer addresses. Before using a non-default GitHub host, stop every old server sharing the database and upgrade it: older binaries ignore the host-binding lock, so a rolling upgrade cannot protect against their writes. See [GitHub host](github.md#github-host).
  - **Storage:** save a bucket in **Admin → Storage** and turn on attachments and backups in S3 before the second server starts. The local disk of a server then holds only temporary files (upload staging, backup downloads), so it can be an ephemeral volume. While other servers run, Orbit refuses to move attachments back to local disks (409 `storage_shared`), and a server that hears other servers while attachments are local logs a warning.

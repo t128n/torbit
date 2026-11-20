@@ -1,47 +1,35 @@
-From 28761119017840768b7df3e6b91ec3143f09e760 Mon Sep 17 00:00:00 2001
+From a428ed2d15f285eb743e40d614aef727447e47f6 Mon Sep 17 00:00:00 2001
 From: Torben Haack <t128n@ipv4.8shield.net>
 Date: Wed, 11 Nov 2026 19:21:12 +0100
-Subject: [PATCH] feat(windows): add native Windows Service support
+Subject: [PATCH 1/4] feat(windows): add native Windows Service support
 
 Adds 'orbit service install' and 'orbit service uninstall' with --name and --env-file, an SCM control handler wired to the existing graceful-shutdown token, and ORBIT_LOG_FILE for services without a console. Fixes Windows backup restore renames with FILE_SHARE_DELETE and retries on transient sharing violations.
 ---
- Cargo.lock                           |  18 ++
+ Cargo.lock                           |  12 +
  apps/server/Cargo.toml               |   3 +
  apps/server/src/cli.rs               |  46 +++
  apps/server/src/main.rs              |  30 +-
  apps/server/src/windows_service.rs   | 414 +++++++++++++++++++++++++++
  crates/platform/src/backup.rs        |  73 ++++-
  crates/platform/src/config.rs        | 136 +++++++++
+ crates/platform/src/db/write_lock.rs |   4 +-
  crates/platform/src/observability.rs |  41 ++-
- 8 files changed, 741 insertions(+), 20 deletions(-)
+ 9 files changed, 738 insertions(+), 21 deletions(-)
  create mode 100644 apps/server/src/windows_service.rs
 
 diff --git a/Cargo.lock b/Cargo.lock
-index b1cd935..aabd935 100644
+index d45039b0..633065fd 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -2456,6 +2456,7 @@ dependencies = [
+@@ -2948,6 +2948,7 @@ dependencies = [
+  "url",
   "utoipa",
   "webauthn-rs",
-  "webp",
 + "windows-service",
   "yrs",
   "zip",
   "zstd",
-@@ -4637,6 +4638,12 @@ version = "2.1.3"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "626c4bac6755d76ffc12cb01b2eac751db1996b9e0041de9aa02c8c211ddc82c"
- 
-+[[package]]
-+name = "widestring"
-+version = "1.2.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
-+
- [[package]]
- name = "winapi"
- version = "0.3.9"
-@@ -4709,6 +4716,17 @@ dependencies = [
+@@ -5539,6 +5540,17 @@ dependencies = [
   "windows-link",
  ]
  
@@ -60,10 +48,10 @@ index b1cd935..aabd935 100644
  name = "windows-strings"
  version = "0.5.1"
 diff --git a/apps/server/Cargo.toml b/apps/server/Cargo.toml
-index 490c5c3..440e44e 100644
+index 9cc04c3d..7a5d7249 100644
 --- a/apps/server/Cargo.toml
 +++ b/apps/server/Cargo.toml
-@@ -65,3 +65,6 @@ sqlx = { version = "0.9", default-features = false, features = ["postgres"] }
+@@ -69,3 +69,6 @@ sqlx = { version = "0.9", default-features = false, features = ["postgres"] }
  tempfile = "3"
  zstd = "0.14"
  tokio-tungstenite = "0.29"
@@ -71,10 +59,10 @@ index 490c5c3..440e44e 100644
 +[target."cfg(windows)".dependencies]
 +windows-service = "0.8.1"
 diff --git a/apps/server/src/cli.rs b/apps/server/src/cli.rs
-index 39f7691..bc52d8b 100644
+index 6f87e09c..06469efc 100644
 --- a/apps/server/src/cli.rs
 +++ b/apps/server/src/cli.rs
-@@ -88,6 +88,34 @@ pub enum Command {
+@@ -90,6 +90,34 @@ pub enum Command {
          #[command(subcommand)]
          command: SetupTokenCommand,
      },
@@ -109,7 +97,7 @@ index 39f7691..bc52d8b 100644
  }
  
  #[derive(Debug, Subcommand)]
-@@ -187,6 +215,20 @@ pub async fn run(cli: Cli, env: BTreeMap<String, String>) -> Result<String, CliE
+@@ -197,6 +225,20 @@ pub async fn run(cli: Cli, env: BTreeMap<String, String>) -> Result<String, CliE
          Command::Root { command } => root(config()?, command).await,
          Command::Openapi { output } => write_openapi(output),
          Command::SetupToken { command } => setup_token(config()?, command).await,
@@ -130,10 +118,10 @@ index 39f7691..bc52d8b 100644
      }
  }
  
-@@ -1318,6 +1360,10 @@ pub fn redacted_config(config: &Config) -> String {
-         Some(listen) => lines.push(format!("ORBIT_METRICS_LISTEN={listen}")),
+@@ -1413,6 +1455,10 @@ pub fn redacted_config(config: &Config) -> String {
          None => lines.push("# ORBIT_METRICS_LISTEN is not set: metrics are disabled".to_owned()),
      }
+     lines.extend(redacted_mail_config(&config.mail));
 +    match &config.log_file {
 +        Some(path) => lines.push(format!("ORBIT_LOG_FILE={}", path.display())),
 +        None => lines.push("# ORBIT_LOG_FILE is not set: logs go to stdout".to_owned()),
@@ -142,7 +130,7 @@ index 39f7691..bc52d8b 100644
          lines.push("ORBIT_APP_KEY=[REDACTED]".to_owned());
      }
 diff --git a/apps/server/src/main.rs b/apps/server/src/main.rs
-index 7a90530..9f9461f 100644
+index 7a905304..9f9461f9 100644
 --- a/apps/server/src/main.rs
 +++ b/apps/server/src/main.rs
 @@ -1,4 +1,6 @@
@@ -200,7 +188,7 @@ index 7a90530..9f9461f 100644
                  println!("{output}");
 diff --git a/apps/server/src/windows_service.rs b/apps/server/src/windows_service.rs
 new file mode 100644
-index 0000000..9bbb70a
+index 00000000..9bbb70ab
 --- /dev/null
 +++ b/apps/server/src/windows_service.rs
 @@ -0,0 +1,414 @@
@@ -619,7 +607,7 @@ index 0000000..9bbb70a
 +    }
 +}
 diff --git a/crates/platform/src/backup.rs b/crates/platform/src/backup.rs
-index 3484956..9f93a27 100644
+index 90b6b3e2..5b1d39ef 100644
 --- a/crates/platform/src/backup.rs
 +++ b/crates/platform/src/backup.rs
 @@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
@@ -631,8 +619,8 @@ index 3484956..9f93a27 100644
  
  use chrono::{Datelike, TimeZone, Utc};
  use fs2::FileExt;
-@@ -464,10 +464,7 @@ impl BackupService {
-                 None,
+@@ -529,10 +529,7 @@ impl BackupService {
+                 key.as_ref(),
              )?;
  
 -            let staged_database_lock = OpenOptions::new()
@@ -643,7 +631,7 @@ index 3484956..9f93a27 100644
                  .map_err(|source| io_error(&staged_database, source))?;
              staged_database_lock
                  .try_lock_exclusive()
-@@ -490,7 +487,7 @@ impl BackupService {
+@@ -555,7 +552,7 @@ impl BackupService {
  
              let switch_result: Result<(), BackupError> = (|| {
                  if database_existed {
@@ -652,7 +640,7 @@ index 3484956..9f93a27 100644
                          .map_err(|source| io_error(&database_path, source))?;
                      database_old_moved = true;
                  } else {
-@@ -501,22 +498,22 @@ impl BackupService {
+@@ -566,22 +563,22 @@ impl BackupService {
                      let original = sidecar_path(&database_path, suffix);
                      if original.exists() {
                          let preserved = sidecar_path(&old_database, suffix);
@@ -679,7 +667,7 @@ index 3484956..9f93a27 100644
                      .map_err(|source| io_error(&attachment_path, source))?;
                  attachments_new_installed = true;
                  Ok(())
-@@ -1317,7 +1314,7 @@ fn rollback_restore(
+@@ -1474,7 +1471,7 @@ fn rollback_restore(
      if attachments_old_moved {
          capture_error(
              &mut first_error,
@@ -688,7 +676,7 @@ index 3484956..9f93a27 100644
                  .map_err(|source| io_error(attachment_path, source)),
          );
      }
-@@ -1327,14 +1324,14 @@ fn rollback_restore(
+@@ -1484,14 +1481,14 @@ fn rollback_restore(
      if database_old_moved {
          capture_error(
              &mut first_error,
@@ -705,7 +693,7 @@ index 3484956..9f93a27 100644
          );
      }
      match first_error {
-@@ -1438,6 +1435,56 @@ fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> BackupError {
+@@ -1595,6 +1592,56 @@ fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> BackupError {
      }
  }
  
@@ -763,10 +751,10 @@ index 3484956..9f93a27 100644
  /// they would push back on reconnect. Every document therefore gets a new epoch (clients with the
  /// old one are told to reset), and so does the generation of not yet opened pages.
 diff --git a/crates/platform/src/config.rs b/crates/platform/src/config.rs
-index 587d64a..efe13a2 100644
+index 8aff3052..80b9962b 100644
 --- a/crates/platform/src/config.rs
 +++ b/crates/platform/src/config.rs
-@@ -26,6 +26,8 @@ const JOBS_CONCURRENCY_ENV: &str = "ORBIT_JOBS_CONCURRENCY";
+@@ -34,6 +34,8 @@ const JOBS_CONCURRENCY_ENV: &str = "ORBIT_JOBS_CONCURRENCY";
  const UPLOADS_MAX_FILE_BYTES_ENV: &str = "ORBIT_UPLOAD_MAX_FILE_BYTES";
  const UPLOADS_MAX_REQUEST_BYTES_ENV: &str = "ORBIT_UPLOAD_MAX_REQUEST_BYTES";
  const METRICS_LISTEN_ENV: &str = "ORBIT_METRICS_LISTEN";
@@ -775,17 +763,17 @@ index 587d64a..efe13a2 100644
  const RATE_LIMITS_ENV_PREFIX: &str = "ORBIT_RATE_LIMIT_";
  const APP_KEY_ENV: &str = "ORBIT_APP_KEY";
  const APP_KEY_FILE_ENV: &str = "ORBIT_APP_KEY_FILE";
-@@ -59,6 +61,9 @@ pub struct Config {
-     pub uploads: UploadConfig,
+@@ -83,6 +85,9 @@ pub struct Config {
      pub metrics: MetricsConfig,
      pub rate_limits: RateLimitConfig,
+     pub mail: MailConfig,
 +    /// Where to write logs instead of stdout (`ORBIT_LOG_FILE`). Stdout is not visible when
 +    /// Orbit runs as a Windows Service, so a bare-metal Windows deployment needs this set.
 +    pub log_file: Option<PathBuf>,
      /// The key for secrets saved in the database (`ORBIT_APP_KEY`). Required: [`Config::validate`]
      /// refuses a configuration without it.
      pub app_key: Option<AppKey>,
-@@ -724,6 +729,33 @@ impl Config {
+@@ -895,6 +900,33 @@ impl Config {
          Ok(config)
      }
  
@@ -819,8 +807,8 @@ index 587d64a..efe13a2 100644
      /// Settings that are valid but unsafe on most networks. `orbit serve` logs each one at startup.
      #[must_use]
      pub fn warnings(&self) -> Vec<String> {
-@@ -861,6 +893,57 @@ impl Config {
-     }
+@@ -1041,6 +1073,57 @@ fn is_http_origin(value: &str) -> bool {
+     })
  }
  
 +/// Parses `KEY=VALUE` lines (blank lines and `#` comments are ignored, a leading `export ` is
@@ -877,7 +865,7 @@ index 587d64a..efe13a2 100644
  fn apply_environment(
      config: &mut Config,
      environment: &BTreeMap<String, String>,
-@@ -924,6 +1007,8 @@ fn apply_environment(
+@@ -1103,6 +1186,8 @@ fn apply_environment(
              config.uploads.max_request_bytes = parse_environment(key, value)?;
          } else if key == METRICS_LISTEN_ENV {
              config.metrics.listen = Some(parse_environment(key, value)?);
@@ -886,7 +874,7 @@ index 587d64a..efe13a2 100644
          } else if let Some(setting) = key
              .strip_prefix(RATE_LIMITS_ENV_PREFIX)
              .and_then(|name| config.rate_limits.setting_mut(&name.to_ascii_lowercase()))
-@@ -1105,6 +1190,57 @@ mod tests {
+@@ -1335,6 +1420,57 @@ mod tests {
          ));
      }
  
@@ -944,8 +932,30 @@ index 587d64a..efe13a2 100644
      #[test]
      fn a_narrow_proxy_and_loopback_metrics_give_no_warning() {
          let config = production(&[("ORBIT_METRICS_LISTEN", "127.0.0.1:9090")]);
+diff --git a/crates/platform/src/db/write_lock.rs b/crates/platform/src/db/write_lock.rs
+index 6c76f5ea..fe849e77 100644
+--- a/crates/platform/src/db/write_lock.rs
++++ b/crates/platform/src/db/write_lock.rs
+@@ -100,6 +100,8 @@ fn call_site_tag(caller: &Location<'_>) -> String {
+     let file: String = caller
+         .file()
+         .chars()
++        // Windows paths use backslashes; keep the separators as `/`.
++        .map(|character| if character == '\\' { '/' } else { character })
+         .filter(|character| character.is_ascii_alphanumeric() || "_./:-".contains(*character))
+         .collect();
+     let room = APPLICATION_NAME_BYTES - PREFIX.len() - line.len();
+@@ -271,7 +273,7 @@ mod tests {
+     #[test]
+     fn write_lock_sql_takes_the_locks_of_the_scope_in_order() {
+         let caller = Location::caller();
+-        let tag = format!("orbit:{}:{}", caller.file(), caller.line());
++        let tag = call_site_tag(caller);
+         let prefix =
+             format!("SET LOCAL lock_timeout = '30s'; SET LOCAL application_name = '{tag}'; ");
+         let global = format!("{prefix}SELECT 1 FROM pg_advisory_xact_lock(8030594652542121842)");
 diff --git a/crates/platform/src/observability.rs b/crates/platform/src/observability.rs
-index 04c977f..8bffc7c 100644
+index 04c977f6..8bffc7c8 100644
 --- a/crates/platform/src/observability.rs
 +++ b/crates/platform/src/observability.rs
 @@ -1,3 +1,7 @@

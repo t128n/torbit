@@ -13,7 +13,7 @@ state you need:
 | `C:\Program Files\Worbit` and `C:\ProgramData\Worbit` | kept: `install.ps1` and `uninstall.ps1` use an existing `Worbit` folder and only default to `Torbit` on a new install |
 | `config\worbit.env` | renamed to `config\torbit.env` by `install.ps1` when it runs (pass `-EnvFile` to override) |
 | Database table `worbit_github_host_binding` | renamed to `torbit_github_host_binding` at the first start of the new build, in one transaction. The row, and so the immutable GitHub host binding, is kept. Safe to run again and on fresh installs |
-| Bridge (`%LOCALAPPDATA%\Worbit\Bridge`, `WORBIT_BRIDGE_HOME`, scheduled task `Worbit Bridge`) | still read when the Torbit names are not in use; `bridge.ps1` autostart replaces the old task with `Torbit Bridge` |
+| Bridge (`%LOCALAPPDATA%\Worbit\Bridge`, `WORBIT_BRIDGE_HOME`, scheduled task `Worbit Bridge`) | still read when the Torbit names are not in use; `torbit-bridge install` removes the old logon task; the Go bridge reads the same config and state |
 | Bridge wire format (`worbit-bridge-v1`, `X-Worbit-*` headers) | unchanged on purpose: renaming it would break every enrolled device |
 | Release zip, tag | now `torbit-windows-x86_64-<version>.zip` and `torbit-v<version>`; the old GitHub URL redirects |
 

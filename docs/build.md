@@ -8,6 +8,7 @@
 - Bun `1.4.4`
 - Git for Windows
 - PowerShell 7 (`pwsh`)
+- Go 1.24 or newer (only for the Outlook bridge in `bridge/`)
 
 The upstream workspace pins Rust in `rust-toolchain.toml`; `rustup` selects it
 automatically inside `.work/orbit`.
@@ -22,6 +23,7 @@ cd torbit
 ./scripts/verify.ps1      # cumulative git apply --check
 ./scripts/apply.ps1       # patch the checkout
 ./scripts/build.ps1       # bun build + cargo build --release
+./scripts/build-bridge.ps1 # Go: bridge/dist/torbit-bridge.exe
 ./scripts/package.ps1     # artifacts/torbit-windows-x86_64-<version>.zip
 ```
 

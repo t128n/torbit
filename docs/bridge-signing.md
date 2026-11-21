@@ -1,8 +1,8 @@
 # Bridge signing format (worbit-bridge-v1)
 
-This is the contract between the Outlook bridge script and the Orbit server patch.
+This is the contract between the Outlook bridge (`bridge/`, Go) and the Orbit server patch.
 Both sides must pass `tests/bridge-vectors.json`. The script side is checked by
-`tests/verify-bridge-vectors.ps1` (Windows PowerShell 5.1, .NET `ECDsa`/CNG).
+`bridge/internal/core` (`go test ./...`, Go `crypto/ecdsa`).
 
 ## Request
 
@@ -61,10 +61,10 @@ in the header and path (same characters, no normalisation).
 ## Signature
 
 - Key: ECDSA on NIST P-256 (`secp256r1`, `nistP256`).
-- Digest: SHA-256 over the UTF-8 signed string (ECDSA hashes it internally; in .NET
-  call `SignData(bytes, SHA256)`).
+- Digest: SHA-256 over the UTF-8 signed string (the bridge hashes it and signs the
+  32-byte digest with CNG `NCryptSignHash`).
 - Format: IEEE-P1363, `r || s`, each 32 bytes big-endian, so exactly 64 bytes.
-  This is the native .NET output. It is not ASN.1 DER. A DER signature is rejected.
+  This is the native CNG output. It is not ASN.1 DER. A DER signature is rejected.
 - Header value: standard base64 (RFC 4648 section 4) with padding. A 64-byte value
   encodes to 88 characters.
 - Public key in the registry and in enrollment: SubjectPublicKeyInfo (SPKI) DER,
@@ -162,4 +162,4 @@ replayed nonce, oversized body, feature off, 503) are listed in
 
 To regenerate: `node tests/generate-bridge-vectors.mjs > tests/bridge-vectors.json`
 (this creates a new key and new signatures). To verify:
-`powershell -NoProfile -ExecutionPolicy Bypass -File tests/verify-bridge-vectors.ps1`.
+`cd bridge && go test ./internal/core -run TestSigningVectors`.

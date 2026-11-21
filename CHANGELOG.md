@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Rewrite the Outlook bridge in Go (`bridge/`, `torbit-bridge.exe`) with native
+  Windows service support, replacing `bridge.ps1` and `TorbitBridge.psm1`. New
+  commands: `setup` (guided enroll + Outlook check + service install), `doctor`,
+  `install`, `uninstall`, `upgrade` (checksum-verified self-update from the
+  release), `start`, `stop`, `logs`; `enroll`, `run`, `backfill`, `status` and
+  `revoke` stay. The service starts the worker in the signed-in user's session,
+  because classic Outlook cannot be automated from session 0, and replaces the
+  logon scheduled task. It keeps the same `config.json`, `state.json`, CNG key
+  and wire format, so enrolled PCs need no re-enrollment.
+- The bridge sweeps every 60 seconds instead of listening for Outlook's new-mail
+  event, and follows `HTTPS_PROXY` or the manual Windows proxy (no PAC scripts).
+- Releases carry `torbit-bridge-windows-x86_64-<version>.exe` and its checksum in
+  `SHA256SUMS`; `scripts/build-bridge.ps1` builds it, and CI tests the Go code.
+
 ## 0.4.1+3
 
 - Rename the project from worbit to torbit ("Torben's Orbit"). Release artifacts are

@@ -1,6 +1,6 @@
 #requires -Version 5.1
 # Packaging checks (smoke.ps1 style, no Pester): scripts parse, the release zip carries the
-# bridge and its docs, and install.ps1 + the env example know the bridge registry path.
+# bridge binary binary and its docs, and install.ps1 + the env example know the bridge registry path.
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $failed = 0
@@ -9,7 +9,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 }
 function Assert-True($Cond, [string]$Message) { if (-not $Cond) { throw $Message } }
 
-foreach ($rel in 'scripts/package.ps1', 'windows/install.ps1', 'windows/uninstall.ps1') {
+foreach ($rel in 'scripts/package.ps1', 'scripts/build-bridge.ps1', 'windows/install.ps1', 'windows/uninstall.ps1') {
     Test-Case "parse $rel" {
         $errors = $null
         [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root $rel), [ref]$null, [ref]$errors)
@@ -40,12 +40,18 @@ Test-Case 'package zip contains bridge and docs' {
         New-Item -ItemType Directory -Force (Join-Path $repo 'target/release'), (Join-Path $repo '.git') | Out-Null
         Set-Content (Join-Path $repo 'target/release/orbit.exe') 'fake' -Encoding ascii
         $out = Join-Path $tmp 'out'
-        & (Join-Path $root 'scripts/package.ps1') -RepoPath $repo -OutputDir $out -Version '0.0.0-test' | Out-Null
+        $dist = Join-Path $root 'bridge/dist'
+        $madeDist = -not (Test-Path (Join-Path $dist 'torbit-bridge.exe'))
+        if ($madeDist) { New-Item -ItemType Directory -Force $dist | Out-Null; Set-Content (Join-Path $dist 'torbit-bridge.exe') 'fake' -Encoding ascii }
+        try { & (Join-Path $root 'scripts/package.ps1') -RepoPath $repo -OutputDir $out -Version '0.0.0-test' | Out-Null }
+        finally { if ($madeDist) { Remove-Item -Recurse -Force $dist } }
         $zip = Join-Path $out 'torbit-windows-x86_64-0.0.0-test.zip'
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [IO.Compression.ZipFile]::OpenRead($zip)
         try { $names = $archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') } } finally { $archive.Dispose() }
-        foreach ($want in 'bridge/bridge.ps1', 'bridge/TorbitBridge.psm1', 'docs/bridge.md', 'docs/bridge-signing.md', 'install.ps1', 'torbit.env.example') {
+        Assert-True (Test-Path (Join-Path $out 'torbit-bridge-windows-x86_64-0.0.0-test.exe')) 'standalone bridge asset is missing'
+        Assert-True ((Get-Content -Raw (Join-Path $out 'SHA256SUMS')) -match 'torbit-bridge-windows-x86_64-0.0.0-test\.exe') 'SHA256SUMS has no bridge entry'
+        foreach ($want in 'bridge/torbit-bridge.exe', 'docs/bridge.md', 'docs/bridge-signing.md', 'install.ps1', 'torbit.env.example') {
             Assert-True ($names -contains $want) "zip is missing $want"
         }
     } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }

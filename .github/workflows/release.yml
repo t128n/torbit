@@ -71,6 +71,18 @@ jobs:
         shell: pwsh
         run: ./tests/smoke.ps1
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+
+      - name: Test and build the Outlook bridge
+        shell: pwsh
+        run: |
+          Push-Location bridge
+          try { go test ./...; if ($LASTEXITCODE -ne 0) { throw "go test failed" } } finally { Pop-Location }
+          ./scripts/build-bridge.ps1
+
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1
@@ -83,7 +95,7 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           $version = (Get-Content VERSION -Raw).Trim()
           $assets = @(Get-ChildItem ./artifacts -File |
-            Where-Object { $_.Extension -eq ".zip" -or $_.Name -eq "SHA256SUMS" } |
+            Where-Object { $_.Extension -eq ".zip" -or $_.Extension -eq ".exe" -or $_.Name -eq "SHA256SUMS" } |
             ForEach-Object FullName)
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.4.1+3
+
+- Rename the project from worbit to torbit ("Torben's Orbit"). Release artifacts are
+  now `torbit-windows-x86_64-<version>.zip`, the tag prefix is `torbit-v`, and the
+  Outlook bridge module is `TorbitBridge.psm1`. Existing installs keep working:
+  see `docs/upgrade.md`.
+- Rename the unmanaged `worbit_github_host_binding` table to
+  `torbit_github_host_binding`. Patch 0002 renames an existing table in one
+  transaction at startup, keeping the row and the immutable host binding, and
+  creates the new table on fresh databases. Take a backup first: a worbit build
+  does not find the renamed table.
+- `install.ps1` keeps an existing `Worbit` install and data folder, moves
+  `worbit.env` to `torbit.env`, and uses `torbit.env.example` for new installs.
+- The bridge still reads `WORBIT_BRIDGE_HOME`, `%LOCALAPPDATA%\Worbit\Bridge` and the
+  `Worbit Bridge` task, and replaces the task with `Torbit Bridge`. The wire format
+  (`worbit-bridge-v1`, `X-Worbit-*`) is unchanged so enrolled devices keep working.
+- Add patch 0007: a dismissible notice in the web app that torbit is an unofficial
+  fork not affiliated with coollabsio, with links to upstream Orbit and this repo.
+- Keep attribution to coollabsio/orbit in README and NOTICE.
+
 ## 0.4.1+2
 
 - Add the Outlook bridge: signed, per-user inbound mail intake that needs no DNS

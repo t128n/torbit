@@ -1,4 +1,4 @@
-# Deploy worbit on Windows Server
+# Deploy torbit on Windows Server
 
 ## Shape of the deployment
 
@@ -27,14 +27,14 @@ Run `orbit.exe` from the extracted folder to try Orbit without registering the
 service. Use development mode and paths under the extraction directory:
 
 ```dotenv
-# C:\Temp\worbit\test.env
+# C:\Temp\torbit\test.env
 ORBIT_ENV=development
 ORBIT_BIND=127.0.0.1
 ORBIT_PORT=8080
-ORBIT_DATABASE_PATH=C:\Temp\worbit\data\orbit.sqlite
-ORBIT_ATTACHMENTS_PATH=C:\Temp\worbit\data\attachments
-ORBIT_BACKUPS_PATH=C:\Temp\worbit\backups
-ORBIT_APP_KEY_FILE=C:\Temp\worbit\app.key
+ORBIT_DATABASE_PATH=C:\Temp\torbit\data\orbit.sqlite
+ORBIT_ATTACHMENTS_PATH=C:\Temp\torbit\data\attachments
+ORBIT_BACKUPS_PATH=C:\Temp\torbit\backups
+ORBIT_APP_KEY_FILE=C:\Temp\torbit\app.key
 ```
 
 Do not set `ORBIT_TRUSTED_PROXIES` in development, and leave out
@@ -49,7 +49,7 @@ $bytes = [byte[]]::new(32)
 $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
 try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
 [System.IO.File]::WriteAllText(
-  "C:\Temp\worbit\app.key",
+  "C:\Temp\torbit\app.key",
   [Convert]::ToBase64String($bytes),
   [System.Text.Encoding]::ASCII)
 ```
@@ -57,7 +57,7 @@ try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
 Then start it:
 
 ```powershell
-$env:ORBIT_ENV_FILE = "C:\Temp\worbit\test.env"
+$env:ORBIT_ENV_FILE = "C:\Temp\torbit\test.env"
 .\orbit.exe config check
 .\orbit.exe serve
 ```
@@ -83,21 +83,21 @@ port and paths; set `RUST_LOG=debug` for verbose console logs. If
 
 ```powershell
 # Elevated prompt
-Expand-Archive .\worbit-windows-x86_64-0.3.0+3.zip C:\Temp\worbit
-cd C:\Temp\worbit
+Expand-Archive .\torbit-windows-x86_64-0.3.0+3.zip C:\Temp\torbit
+cd C:\Temp\torbit
 
-Copy-Item .\worbit.env.example .\worbit.env
-notepad .\worbit.env
+Copy-Item .\torbit.env.example .\torbit.env
+notepad .\torbit.env
 
-.\install.ps1 -EnvFile .\worbit.env
+.\install.ps1 -EnvFile .\torbit.env
 ```
 
-`install.ps1` installs to `C:\Program Files\Worbit`, keeps state under
-`C:\ProgramData\Worbit`, applies ACLs, validates the configuration, registers
+`install.ps1` installs to `C:\Program Files\Torbit`, keeps state under
+`C:\ProgramData\Torbit`, applies ACLs, validates the configuration, registers
 the service, and starts it.
 
 On the first install it also creates the app key at the path in
-`ORBIT_APP_KEY_FILE` (default `C:\ProgramData\Worbit\config\app.key`) if that
+`ORBIT_APP_KEY_FILE` (default `C:\ProgramData\Torbit\config\app.key`) if that
 file does not exist, unless `ORBIT_APP_KEY` is set. If the env file names neither
 setting, the installer adds `ORBIT_APP_KEY_FILE` for the default path. Back the
 key up immediately: it is not in the database backup, and a restored database
@@ -105,7 +105,7 @@ cannot decrypt saved secrets without it.
 
 ## Configuration
 
-`C:\ProgramData\Worbit\config\worbit.env` is read at every service start.
+`C:\ProgramData\Torbit\config\torbit.env` is read at every service start.
 
 ```dotenv
 ORBIT_ENV=production
@@ -113,11 +113,11 @@ ORBIT_BIND=127.0.0.1
 ORBIT_PORT=8080
 ORBIT_PUBLIC_ORIGIN=https://orbit.example.com
 ORBIT_TRUSTED_PROXIES=127.0.0.1/32
-ORBIT_DATABASE_PATH=C:\ProgramData\Worbit\data\orbit.sqlite
-ORBIT_ATTACHMENTS_PATH=C:\ProgramData\Worbit\data\attachments
-ORBIT_BACKUPS_PATH=C:\ProgramData\Worbit\backups
-ORBIT_APP_KEY_FILE=C:\ProgramData\Worbit\config\app.key
-ORBIT_LOG_FILE=C:\ProgramData\Worbit\logs\orbit.log
+ORBIT_DATABASE_PATH=C:\ProgramData\Torbit\data\orbit.sqlite
+ORBIT_ATTACHMENTS_PATH=C:\ProgramData\Torbit\data\attachments
+ORBIT_BACKUPS_PATH=C:\ProgramData\Torbit\backups
+ORBIT_APP_KEY_FILE=C:\ProgramData\Torbit\config\app.key
+ORBIT_LOG_FILE=C:\ProgramData\Torbit\logs\orbit.log
 
 # Optional: GitHub Enterprise. Leave unset for github.com.
 # ORBIT_GITHUB_URL=https://ghe.example.com
@@ -159,23 +159,23 @@ The default is LocalSystem. A dedicated account is better:
 
 ```powershell
 $cred = Get-Credential
-.\install.ps1 -EnvFile .\worbit.env -Account $cred.UserName `
+.\install.ps1 -EnvFile .\torbit.env -Account $cred.UserName `
   -Password $cred.GetNetworkCredential().Password
 ```
 
-Grant "Log on as a service" and full control of `C:\ProgramData\Worbit`.
+Grant "Log on as a service" and full control of `C:\ProgramData\Torbit`.
 `install.ps1` applies the directory ACL; `secpol.msc` grants the logon right.
 
 ## Logs
 
 The native service has no console. `ORBIT_LOG_FILE` is required; the install
-script points it at `C:\ProgramData\Worbit\logs\orbit.log`.
+script points it at `C:\ProgramData\Torbit\logs\orbit.log`.
 
 The file is append-only. Rotate it with a scheduled task, or use an external log
 collector. Example scheduled task action:
 
 ```powershell
-$log = "C:\ProgramData\Worbit\logs\orbit.log"
+$log = "C:\ProgramData\Torbit\logs\orbit.log"
 if (Test-Path $log) {
     Move-Item $log "$log.$(Get-Date -Format yyyyMMdd-HHmmss)"
 }

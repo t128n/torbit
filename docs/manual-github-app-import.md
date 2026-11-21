@@ -1,10 +1,10 @@
-# Manually Import a GitHub App into Orbit/worbit
+# Manually Import a GitHub App into Orbit/torbit
 
 When you can't use the manifest flow (e.g., GitHub Enterprise with personal account restrictions), you can manually create the app and import the credentials using Orbit's API.
 
 ## Quick Start (Recommended)
 
-After building worbit with patch `0004-feat-manual-github-app-registration.patch`:
+After building torbit with patch `0004-feat-manual-github-app-registration.patch`:
 
 ```powershell
 # 1. Create the GitHub App manually on GHES
@@ -34,7 +34,7 @@ Invoke-RestMethod -Method Post `
 
 ## Prerequisites
 
-1. **Build worbit with patch 0004** - This adds the manual registration endpoint
+1. **Build torbit with patch 0004** - This adds the manual registration endpoint
 2. **Create the GitHub App manually** (see Step 1 below)
 
 ## Step 1: Create the GitHub App Manually
@@ -158,13 +158,13 @@ In Orbit:
 
 ```powershell
 # Check if app is in database
-sqlite3 "C:\ProgramData\Worbit\data\orbit.sqlite" "SELECT * FROM github_apps;"
+sqlite3 "C:\ProgramData\Torbit\data\orbit.sqlite" "SELECT * FROM github_apps;"
 
 # Check installations (should populate after you install the app)
-sqlite3 "C:\ProgramData\Worbit\data\orbit.sqlite" "SELECT * FROM github_installations;"
+sqlite3 "C:\ProgramData\Torbit\data\orbit.sqlite" "SELECT * FROM github_installations;"
 
 # Check repositories
-sqlite3 "C:\ProgramData\Worbit\data\orbit.sqlite" "SELECT * FROM github_installation_repositories;"
+sqlite3 "C:\ProgramData\Torbit\data\orbit.sqlite" "SELECT * FROM github_installation_repositories;"
 ```
 
 ### Webhook errors
@@ -172,13 +172,13 @@ sqlite3 "C:\ProgramData\Worbit\data\orbit.sqlite" "SELECT * FROM github_installa
 Check Orbit logs:
 
 ```powershell
-Get-Content "C:\ProgramData\Worbit\logs\orbit.log" -Tail 100 | Select-String "github"
+Get-Content "C:\ProgramData\Torbit\logs\orbit.log" -Tail 100 | Select-String "github"
 ```
 
 Common issues:
 - **Wrong webhook URL**: Ensure it's `{origin}/api/v1/integrations/github/webhook`
 - **Wrong webhook secret**: Make sure it matches what's configured in GitHub
-- **GitHub host mismatch**: Verify `worbit_github_host_binding` matches your `ORBIT_GITHUB_URL`
+- **GitHub host mismatch**: Verify `torbit_github_host_binding` matches your `ORBIT_GITHUB_URL`
 
 ### Encryption errors
 

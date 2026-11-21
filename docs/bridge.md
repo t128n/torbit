@@ -14,10 +14,10 @@ workspace.
 ## Turn it on (administrator)
 
 The feature is off by default. To turn it on, set the registry file path in
-`worbit.env` and run `install.ps1` again:
+`torbit.env` and run `install.ps1` again:
 
 ```text
-ORBIT_MAIL_BRIDGE_REGISTRY_PATH=C:\ProgramData\Worbit\config\bridge-registry.json
+ORBIT_MAIL_BRIDGE_REGISTRY_PATH=C:\ProgramData\Torbit\config\bridge-registry.json
 ```
 
 Mail must also be on for the instance. `install.ps1` creates the directory and
@@ -40,7 +40,7 @@ Run them from the `bridge` folder of the release zip.
 The script asks for your Orbit session token if you do not pass one. It makes a
 key pair on the PC (in the TPM when one is available), registers the public
 key, and stores the device id and server in
-`%LOCALAPPDATA%\Worbit\Bridge\config.json`. Use `-Force` to replace an existing
+`%LOCALAPPDATA%\Torbit\Bridge\config.json`. Use `-Force` to replace an existing
 enrollment. With `-Force`, items that were skipped because the old device was
 rejected (HTTP 401 or 404) are forgotten, so the next sweep sends them again;
 items skipped as too large (413) or for another reason stay skipped.
@@ -64,7 +64,7 @@ answers 401 or 413 (or another 4xx), the item is recorded as skipped and not
 sent again. Attachments are read from Outlook one item at a time, only when the
 item is sent; an item that Outlook reports as larger than 2 MiB is skipped
 (413, too large) without reading its attachments. Only one `run` can be active per Windows user. The log is
-`bridge.log` in `%LOCALAPPDATA%\Worbit\Bridge`; it has events and ids only,
+`bridge.log` in `%LOCALAPPDATA%\Torbit\Bridge`; it has events and ids only,
 never message text.
 
 ### install-autostart / remove-autostart
@@ -74,7 +74,7 @@ never message text.
 .\bridge.ps1 remove-autostart
 ```
 
-Adds or removes a scheduled task, "Worbit Bridge", that starts `run` when you
+Adds or removes a scheduled task, "Torbit Bridge", that starts `run` when you
 sign in. It runs in your own session, not elevated, so it can use Outlook.
 
 ### backfill

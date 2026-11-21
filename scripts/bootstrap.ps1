@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $lock = Get-UpstreamConfig
 if (-not $RepoPath) {
-    $RepoPath = Join-Path $script:WorbitRoot ".work/orbit"
+    $RepoPath = Join-Path $script:TorbitRoot ".work/orbit"
 }
 
 if (-not (Test-Path (Join-Path $RepoPath ".git"))) {

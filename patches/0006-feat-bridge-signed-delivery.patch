@@ -1,7 +1,7 @@
-From f36b2139fc35ca86cbed0c2eb6b328ce95134ffb Mon Sep 17 00:00:00 2001
+From 03c5c3cd14fe3fb0e2ae935549b5d5a3ea2d964b Mon Sep 17 00:00:00 2001
 From: Torben Haack <t128n@ipv4.8shield.net>
 Date: Sat, 21 Nov 2026 17:30:58 +0100
-Subject: [PATCH] feat(mail): add signed Worbit bridge delivery endpoint
+Subject: [PATCH 6/7] feat(mail): add signed Torbit bridge delivery endpoint
 
 ---
  apps/server/src/mail_bridge.rs            | 216 ++++++
@@ -23,7 +23,7 @@ index b4737000..82f26398 100644
          .map_err(|error| sqlx::Error::Decode(Box::new(error)))
  }
 +
-+// Signed delivery (`docs/bridge-signing.md` of the Worbit repository, format `worbit-bridge-v1`).
++// Signed delivery (`docs/bridge-signing.md` of the Torbit repository, format `worbit-bridge-v1`).
 +
 +/// The first line of the signed string.
 +pub const SIGNING_FORMAT: &str = "worbit-bridge-v1";
@@ -246,7 +246,7 @@ index 64c4d630..3afef63b 100644
  pub enum Source {
      Smtp,
      Provider(ProviderKind),
-+    /// A Worbit bridge device (signed HTTPS delivery).
++    /// A Torbit bridge device (signed HTTPS delivery).
 +    Bridge,
  }
  
@@ -410,7 +410,7 @@ index 37711961..b5f1ddcb 100644
 +    // The only header Orbit adds: where the message came from. No `Authentication-Results`: no
 +    // check of the sender ran, and the device's signature says nothing about the message's From.
 +    let trace = format!(
-+        "Received: from worbit-bridge (device {device_id}) by Orbit with HTTPS;\r\n\t{received}\r\n"
++        "Received: from torbit-bridge (device {device_id}) by Orbit with HTTPS;\r\n\t{received}\r\n"
 +    );
 +    let mut message = Vec::with_capacity(trace.len() + raw.len());
 +    message.extend_from_slice(trace.as_bytes());
@@ -562,7 +562,7 @@ index a1f33ee5..f557e696 100644
 +++ b/apps/server/src/mail_routes/mod.rs
 @@ -63,6 +63,8 @@ pub struct MailState {
      pub(crate) inbound: Option<Arc<ProviderIntake>>,
-     /// Worbit bridge devices; `None`: the bridge routes answer 404.
+     /// Torbit bridge devices; `None`: the bridge routes answer 404.
      pub(crate) bridge: Option<Arc<crate::mail_bridge::BridgeRegistry>>,
 +    /// The signed delivery of those devices: own intake, nonce memory.
 +    pub(crate) bridge_delivery: Option<Arc<crate::mail_bridge::BridgeDelivery>>,
@@ -593,7 +593,7 @@ index a1f33ee5..f557e696 100644
 +        }
      }
  
-     /// Turns on the Worbit bridge device routes (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`).
+     /// Turns on the Torbit bridge device routes (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`).
      #[must_use]
 -    pub fn with_bridge(mut self, registry: Arc<crate::mail_bridge::BridgeRegistry>) -> Self {
 -        self.bridge = Some(registry);
@@ -669,8 +669,8 @@ index 00000000..2156fa1a
 --- /dev/null
 +++ b/apps/server/tests/mail_bridge_delivery.rs
 @@ -0,0 +1,773 @@
-+//! `POST /api/v1/mail/inbound/bridge/{device_id}`: signed delivery from a Worbit bridge device.
-+//! The signing cases come from `tests/bridge-vectors.json` of the Worbit repository (the contract
++//! `POST /api/v1/mail/inbound/bridge/{device_id}`: signed delivery from a Torbit bridge device.
++//! The signing cases come from `tests/bridge-vectors.json` of the Torbit repository (the contract
 +//! of `docs/bridge-signing.md`); the state-dependent cases (unknown, revoked, replay, size, off)
 +//! are tested here directly.
 +
@@ -1464,6 +1464,3 @@ index 37ecd93e..5b12a602 100644
      for path in [
          "/api/v1/setup/status",
          "/api/v1/auth/me",
--- 
-2.56.0.windows.4
-

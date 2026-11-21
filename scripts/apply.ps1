@@ -21,7 +21,7 @@ if ($Reverse) {
 }
 
 foreach ($name in $patches) {
-    $patch = Join-Path $script:WorbitRoot "patches" $name
+    $patch = Join-Path $script:TorbitRoot "patches" $name
     $mode = if ($Reverse) { "Reversing" } else { "Applying" }
     Write-Step "$mode $name"
     if ($Reverse) {

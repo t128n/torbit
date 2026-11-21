@@ -28,24 +28,24 @@ Test-Case 'install.ps1 handles the registry path and ACLs' {
     Assert-True ($block -match '(?m)^    Set-DirectoryAcl \$RegistryDir') 'the registry directory ACL must be applied unconditionally'
 }
 Test-Case 'env example documents the registry path as opt-in' {
-    $text = Get-Content -Raw (Join-Path $root 'windows/worbit.env.example')
+    $text = Get-Content -Raw (Join-Path $root 'windows/torbit.env.example')
     Assert-True ($text -match '(?m)^# ORBIT_MAIL_BRIDGE_REGISTRY_PATH=') 'example must carry a commented-out ORBIT_MAIL_BRIDGE_REGISTRY_PATH'
     Assert-True ($text -notmatch '(?m)^ORBIT_MAIL_BRIDGE_REGISTRY_PATH=') 'registry path must not be enabled by default'
 }
 
 Test-Case 'package zip contains bridge and docs' {
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('worbit-pkg-' + [guid]::NewGuid())
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('torbit-pkg-' + [guid]::NewGuid())
     try {
         $repo = Join-Path $tmp 'repo'
         New-Item -ItemType Directory -Force (Join-Path $repo 'target/release'), (Join-Path $repo '.git') | Out-Null
         Set-Content (Join-Path $repo 'target/release/orbit.exe') 'fake' -Encoding ascii
         $out = Join-Path $tmp 'out'
         & (Join-Path $root 'scripts/package.ps1') -RepoPath $repo -OutputDir $out -Version '0.0.0-test' | Out-Null
-        $zip = Join-Path $out 'worbit-windows-x86_64-0.0.0-test.zip'
+        $zip = Join-Path $out 'torbit-windows-x86_64-0.0.0-test.zip'
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [IO.Compression.ZipFile]::OpenRead($zip)
         try { $names = $archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') } } finally { $archive.Dispose() }
-        foreach ($want in 'bridge/bridge.ps1', 'bridge/WorbitBridge.psm1', 'docs/bridge.md', 'docs/bridge-signing.md', 'install.ps1', 'worbit.env.example') {
+        foreach ($want in 'bridge/bridge.ps1', 'bridge/TorbitBridge.psm1', 'docs/bridge.md', 'docs/bridge-signing.md', 'install.ps1', 'torbit.env.example') {
             Assert-True ($names -contains $want) "zip is missing $want"
         }
     } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }

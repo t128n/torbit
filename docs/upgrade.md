@@ -1,5 +1,35 @@
 # Upgrade and rollback
 
+## Upgrading from worbit (rename to torbit)
+
+The project was renamed from `worbit` to `torbit` in `0.4.1+3`. Existing installs
+keep working without manual steps, and nothing is renamed on disk that holds
+state you need:
+
+| What | After the upgrade |
+|---|---|
+| Service name | unchanged (`Orbit`) |
+| `ORBIT_*` settings | unchanged |
+| `C:\Program Files\Worbit` and `C:\ProgramData\Worbit` | kept: `install.ps1` and `uninstall.ps1` use an existing `Worbit` folder and only default to `Torbit` on a new install |
+| `config\worbit.env` | renamed to `config\torbit.env` by `install.ps1` when it runs (pass `-EnvFile` to override) |
+| Database table `worbit_github_host_binding` | renamed to `torbit_github_host_binding` at the first start of the new build, in one transaction. The row, and so the immutable GitHub host binding, is kept. Safe to run again and on fresh installs |
+| Bridge (`%LOCALAPPDATA%\Worbit\Bridge`, `WORBIT_BRIDGE_HOME`, scheduled task `Worbit Bridge`) | still read when the Torbit names are not in use; `bridge.ps1` autostart replaces the old task with `Torbit Bridge` |
+| Bridge wire format (`worbit-bridge-v1`, `X-Worbit-*` headers) | unchanged on purpose: renaming it would break every enrolled device |
+| Release zip, tag | now `torbit-windows-x86_64-<version>.zip` and `torbit-v<version>`; the old GitHub URL redirects |
+
+Before you start the new build:
+
+1. Take a verified backup (below). The table rename is part of the first start.
+2. Know that **a rollback to a worbit build will not find the renamed table**.
+   `ensure_schema` in that build creates an empty `worbit_github_host_binding`,
+   which then binds the host again (to the default host when GitHub data exists, else the configured one), and that
+   fails if the database already holds GitHub data for another host. Roll back
+   by restoring the pre-upgrade backup, not only the old executable.
+
+The first web page load after the upgrade shows a dismissible notice that torbit
+is an unofficial fork of Orbit; the dismissal is remembered in the browser.
+
+
 ## Before upgrading
 
 1. Read the upstream release notes for the tag in `upstream.lock`.

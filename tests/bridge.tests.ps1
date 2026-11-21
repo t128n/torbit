@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $VectorFile) { $VectorFile = Join-Path $here 'bridge-vectors.json' }
 
-$modulePath = Join-Path $here '..\windows\bridge\WorbitBridge.psm1'
+$modulePath = Join-Path $here '..\windows\bridge\TorbitBridge.psm1'
 Import-Module $modulePath -Force
 
 $script:failed = 0
@@ -154,7 +154,7 @@ Test-Case 'default timestamp and nonce follow the field rules' {
 # ---- key store
 
 Test-Case 'key is non-exportable P-256, public key is 91-byte SPKI that verifies signatures' {
-    $name = 'Worbit-Bridge-test-' + [guid]::NewGuid().ToString('N')
+    $name = 'Torbit-Bridge-test-' + [guid]::NewGuid().ToString('N')
     $prov = New-BridgeKey -Name $name -Provider 'Microsoft Software Key Storage Provider'
     try {
         $key = Open-BridgeKey $name $prov
@@ -227,7 +227,7 @@ Test-Case 'html only item with no transport headers gets From, Date, Message-ID 
     $m = Split-Mime (ConvertTo-MimeMessage -Item $item)
     Assert-True ((Get-Hdr $m 'content-type') -like 'text/html*') 'html root'
     Assert-True ((Get-Hdr $m 'subject') -like '=?UTF-8?B?*?=') 'RFC 2047 subject'
-    Assert-True ((Get-Hdr $m 'message-id') -like '<*@worbit-bridge.invalid>') 'synthetic message-id'
+    Assert-True ((Get-Hdr $m 'message-id') -like '<*@torbit-bridge.invalid>') 'synthetic message-id'
     Assert-True ((Get-Hdr $m 'from') -like '*<alice@example.com>') 'from'
     Assert-Equal (Get-Hdr $m 'date') 'Wed, 04 Mar 2026 05:07:07 +0000'.Replace('05:07:07', '05:06:07') 'date from received time'
 }
@@ -297,21 +297,36 @@ Test-Case 'message over 2 MiB is permanent and never sent' {
     Assert-Equal $script:calls 0 'no request'
 }
 
+Test-Case 'bridge home: TORBIT_BRIDGE_HOME wins, the pre-rebrand WORBIT_BRIDGE_HOME still works' {
+    $oldT = $env:TORBIT_BRIDGE_HOME; $oldW = $env:WORBIT_BRIDGE_HOME
+    $t = Join-Path ([IO.Path]::GetTempPath()) ('torbit-home-' + [guid]::NewGuid())
+    $w = Join-Path ([IO.Path]::GetTempPath()) ('worbit-home-' + [guid]::NewGuid())
+    try {
+        $env:TORBIT_BRIDGE_HOME = $null; $env:WORBIT_BRIDGE_HOME = $w
+        Assert-Equal (Get-BridgeHome) $w 'legacy variable used when the new one is unset'
+        $env:TORBIT_BRIDGE_HOME = $t
+        Assert-Equal (Get-BridgeHome) $t 'new variable wins'
+    } finally {
+        $env:TORBIT_BRIDGE_HOME = $oldT; $env:WORBIT_BRIDGE_HOME = $oldW
+        Remove-Item -Recurse -Force $t, $w -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'log never contains body text' {
-    $env:WORBIT_BRIDGE_HOME = Join-Path ([IO.Path]::GetTempPath()) ('worbit-bridge-log-' + [guid]::NewGuid())
+    $env:TORBIT_BRIDGE_HOME = Join-Path ([IO.Path]::GetTempPath()) ('torbit-bridge-log-' + [guid]::NewGuid())
     try {
         Set-BridgeHttpTransport { param($r) @{ Status = 200; Body = '' } }
         [void](Send-BridgeItem -Config $config -Signer $vectorSigner -Item (New-FakeItem @{ Body = 'SECRET-BODY-MARKER' }))
-        $log = Get-Content -Raw (Join-Path $env:WORBIT_BRIDGE_HOME 'bridge.log')
+        $log = Get-Content -Raw (Join-Path $env:TORBIT_BRIDGE_HOME 'bridge.log')
         Assert-True ($log -notmatch 'SECRET-BODY-MARKER') 'body in log'
         Assert-True ($log -match 'Delivered') 'event logged'
-    } finally { Remove-Item -Recurse -Force $env:WORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:WORBIT_BRIDGE_HOME }
+    } finally { Remove-Item -Recurse -Force $env:TORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:TORBIT_BRIDGE_HOME }
 }
 
 # ---- enrollment
 
 Test-Case 'enroll registers the public key, stores config without secrets, keeps key non-exportable' {
-    $env:WORBIT_BRIDGE_HOME = Join-Path ([IO.Path]::GetTempPath()) ('worbit-bridge-enroll-' + [guid]::NewGuid())
+    $env:TORBIT_BRIDGE_HOME = Join-Path ([IO.Path]::GetTempPath()) ('torbit-bridge-enroll-' + [guid]::NewGuid())
     $cfg = $null
     try {
         $script:req = $null
@@ -339,23 +354,23 @@ Test-Case 'enroll registers the public key, stores config without secrets, keeps
         Assert-True $threw 'second enroll without -Force is refused'
     } finally {
         if ($cfg) { Remove-BridgeKey $cfg.key_name $cfg.key_provider }
-        Remove-Item -Recurse -Force $env:WORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:WORBIT_BRIDGE_HOME
+        Remove-Item -Recurse -Force $env:TORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:TORBIT_BRIDGE_HOME
     }
 }
 
 Test-Case 'failed enroll leaves no key and no config, with a plain message' {
-    $env:WORBIT_BRIDGE_HOME = Join-Path ([IO.Path]::GetTempPath()) ('worbit-bridge-enroll-' + [guid]::NewGuid())
+    $env:TORBIT_BRIDGE_HOME = Join-Path ([IO.Path]::GetTempPath()) ('torbit-bridge-enroll-' + [guid]::NewGuid())
     try {
         Set-BridgeHttpTransport { param($r) @{ Status = 401; Body = '' } }
         $msg = ''
         try { Invoke-BridgeEnroll -Server 'https://orbit.example.com' -WorkspaceId 'ws-1' -Credential 'bad' -Provider 'Microsoft Software Key Storage Provider' } catch { $msg = $_.Exception.Message }
         Assert-True ($msg -like '*did not accept the credential*') "message: $msg"
         Assert-True (-not (Read-BridgeConfig)) 'no config'
-    } finally { Remove-Item -Recurse -Force $env:WORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:WORBIT_BRIDGE_HOME }
+    } finally { Remove-Item -Recurse -Force $env:TORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:TORBIT_BRIDGE_HOME }
 }
 
 Test-Case 'enroll -Force forgets items skipped for auth failures (401/404) so they are retried, and keeps the other records' {
-    $env:WORBIT_BRIDGE_HOME = Join-Path ([IO.Path]::GetTempPath()) ('worbit-bridge-enroll-' + [guid]::NewGuid())
+    $env:TORBIT_BRIDGE_HOME = Join-Path ([IO.Path]::GetTempPath()) ('torbit-bridge-enroll-' + [guid]::NewGuid())
     $cfg = $null
     try {
         Write-BridgeConfig ([pscustomobject]@{ server = 'https://orbit.example.com'; device_id = 'old'; key_name = 'k'; key_provider = 'p'; enrolled_at = '2026-01-01T00:00:00.0000000Z' })
@@ -375,7 +390,7 @@ Test-Case 'enroll -Force forgets items skipped for auth failures (401/404) so th
         Assert-True ($cursor -le [DateTime]::SpecifyKind([DateTime]'2026-03-01T10:00:00', 'Utc')) 'cursor moved back to the oldest forgotten item'
     } finally {
         if ($cfg) { Remove-BridgeKey $cfg.key_name $cfg.key_provider }
-        Remove-Item -Recurse -Force $env:WORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:WORBIT_BRIDGE_HOME
+        Remove-Item -Recurse -Force $env:TORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:TORBIT_BRIDGE_HOME
     }
 }
 
@@ -400,8 +415,8 @@ Test-Case 'blocked COM access becomes a plain-language message without hex codes
 
 # ---- run loop, sweep, backfill (fake Outlook, fake transport)
 
-function New-RunHome { $h = Join-Path ([IO.Path]::GetTempPath()) ('worbit-bridge-run-' + [guid]::NewGuid()); $env:WORBIT_BRIDGE_HOME = $h; Write-BridgeConfig $runConfig; return $h }
-function Remove-RunHome([string]$h) { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue; Remove-Item Env:WORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue }
+function New-RunHome { $h = Join-Path ([IO.Path]::GetTempPath()) ('torbit-bridge-run-' + [guid]::NewGuid()); $env:TORBIT_BRIDGE_HOME = $h; Write-BridgeConfig $runConfig; return $h }
+function Remove-RunHome([string]$h) { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue; Remove-Item Env:TORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue }
 function Get-RecvTime([string]$Iso) { [DateTime]::SpecifyKind([DateTime]$Iso, 'Utc') }
 $runConfig = [pscustomobject]@{ server = 'https://orbit.example.com'; workspace_id = 'ws1'; device_id = $doc.device_id; address = 'x@y.bridge.invalid'
     device_name = 'T'; key_name = 'k'; key_provider = 'p'; enrolled_at = '2026-01-01T00:00:00.0000000Z' }
@@ -683,7 +698,7 @@ Test-Case 'revoke calls the server, deletes the key, config and state' {
     $h = New-RunHome
     try {
         $prov = 'Microsoft Software Key Storage Provider'
-        $keyName = 'Worbit-Bridge-test-' + [guid]::NewGuid().ToString('N')
+        $keyName = 'Torbit-Bridge-test-' + [guid]::NewGuid().ToString('N')
         [void](New-BridgeKey -Name $keyName -Provider $prov)
         $cfg = $runConfig.PSObject.Copy(); $cfg.key_name = $keyName; $cfg.key_provider = $prov
         Write-BridgeConfig $cfg; Write-BridgeState @{ version = 1; items = @{} }
@@ -707,7 +722,7 @@ Test-Case 'revoke calls the server, deletes the key, config and state' {
 Test-Case 'failed revoke keeps everything; -LocalOnly removes local data without a request' {
     $h = New-RunHome
     $prov = 'Microsoft Software Key Storage Provider'
-    $keyName = 'Worbit-Bridge-test-' + [guid]::NewGuid().ToString('N')
+    $keyName = 'Torbit-Bridge-test-' + [guid]::NewGuid().ToString('N')
     try {
         [void](New-BridgeKey -Name $keyName -Provider $prov)
         $cfg = $runConfig.PSObject.Copy(); $cfg.key_name = $keyName; $cfg.key_provider = $prov
@@ -729,7 +744,7 @@ Test-Case 'failed revoke keeps everything; -LocalOnly removes local data without
 # ---- autostart
 
 Test-Case 'autostart registers a logon task for the current user in the interactive session, and removes it' {
-    $taskName = 'WorbitBridge-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $taskName = 'TorbitBridge-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
     try {
         Install-BridgeAutostart -TaskName $taskName -ScriptPath 'C:\Bridge\bridge.ps1'
         $t = Get-ScheduledTask -TaskName $taskName

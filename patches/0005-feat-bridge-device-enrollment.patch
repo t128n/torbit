@@ -1,7 +1,7 @@
-From d0bc0c79905a28ee7b6c322bcf916c0ab445093d Mon Sep 17 00:00:00 2001
+From 8c31f5156bb62712f6a6370e107a4f0f4ba9240d Mon Sep 17 00:00:00 2001
 From: Torben <x@x.invalid>
 Date: Sat, 21 Nov 2026 17:18:34 +0100
-Subject: [PATCH] feat(mail): add Worbit bridge device enrollment
+Subject: [PATCH 5/7] feat(mail): add Torbit bridge device enrollment
 
 ---
  apps/server/src/app.rs                |   9 +-
@@ -76,7 +76,7 @@ index 00000000..b4737000
 --- /dev/null
 +++ b/apps/server/src/mail_bridge.rs
 @@ -0,0 +1,384 @@
-+//! Worbit bridge devices: the device registry file and the destination a device delivers to.
++//! Torbit bridge devices: the device registry file and the destination a device delivers to.
 +//!
 +//! The registry is one JSON file (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`): a device id, the device's
 +//! P-256 public key (SPKI DER, base64) and the mailbox address its mail goes to. It is written
@@ -419,7 +419,7 @@ index 00000000..b4737000
 +    .bind(mailbox_id.to_string())
 +    .bind(workspace_id.to_string())
 +    .bind(if mailbox_name.is_empty() {
-+        "Worbit"
++        "Torbit"
 +    } else {
 +        &mailbox_name
 +    })
@@ -468,7 +468,7 @@ index 4fd7b07a..3e5d184c 100644
          let Some(domain) = self.repository.domain_for_check(domain_id).await? else {
              return Ok(None);
          };
-+        // The reserved domain of the Worbit bridge has no DNS: nothing to verify, nothing to suspend.
++        // The reserved domain of the Torbit bridge has no DNS: nothing to verify, nothing to suspend.
 +        if domain.name.ends_with(".invalid") {
 +            return Ok(Some(domain.status));
 +        }
@@ -481,7 +481,7 @@ index 00000000..37711961
 --- /dev/null
 +++ b/apps/server/src/mail_routes/bridge.rs
 @@ -0,0 +1,256 @@
-+//! Worbit bridge devices: enroll, list and revoke. Session-authenticated. The routes answer 404
++//! Torbit bridge devices: enroll, list and revoke. Session-authenticated. The routes answer 404
 +//! while the registry path is not configured or mail is off on the instance. A member sees and
 +//! revokes their own devices; a workspace owner or admin can revoke any device of the workspace.
 +
@@ -753,7 +753,7 @@ index af7868bd..a1f33ee5 100644
      pub(crate) dns: Arc<dyn DnsLookup>,
      /// Mail from providers' webhooks; `None`: the route answers 503.
      pub(crate) inbound: Option<Arc<ProviderIntake>>,
-+    /// Worbit bridge devices; `None`: the bridge routes answer 404.
++    /// Torbit bridge devices; `None`: the bridge routes answer 404.
 +    pub(crate) bridge: Option<Arc<crate::mail_bridge::BridgeRegistry>>,
  }
  
@@ -775,7 +775,7 @@ index af7868bd..a1f33ee5 100644
 +        self
 +    }
 +
-+    /// Turns on the Worbit bridge device routes (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`).
++    /// Turns on the Torbit bridge device routes (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`).
 +    #[must_use]
 +    pub fn with_bridge(mut self, registry: Arc<crate::mail_bridge::BridgeRegistry>) -> Self {
 +        self.bridge = Some(registry);
@@ -820,7 +820,7 @@ index 00000000..b5648f9e
 --- /dev/null
 +++ b/apps/server/tests/mail_bridge.rs
 @@ -0,0 +1,598 @@
-+//! Worbit bridge device enrollment: the registry file, the enrollment, list and revoke API, the
++//! Torbit bridge device enrollment: the registry file, the enrollment, list and revoke API, the
 +//! per-workspace `.invalid` domain with the user's personal mailbox, and the DNS check that
 +//! leaves that domain alone.
 +
@@ -1456,7 +1456,7 @@ index 304dca75..8f291ab2 100644
      pub dns_resolver: Option<SocketAddr>,
      /// A separate origin for HTML views and attachments.
      pub content_origin: Option<String>,
-+    /// The Worbit bridge device registry file. Not set: the bridge is off.
++    /// The Torbit bridge device registry file. Not set: the bridge is off.
 +    pub bridge_registry_path: Option<PathBuf>,
  }
  
@@ -1501,6 +1501,3 @@ index b565afe6..ac2db185 100644
      assert_eq!(
          mail.content_origin.as_deref(),
          Some("http://127.0.0.2:8080")
--- 
-2.56.0.windows.4
-

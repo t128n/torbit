@@ -1,7 +1,7 @@
-From 1d711a3ac3d72365f4c88c70bdc8e785ff97ed41 Mon Sep 17 00:00:00 2001
+From cac3e25215b53df2f731b64a4db2f855f83c701a Mon Sep 17 00:00:00 2001
 From: OpenCode Agent <opencode@localhost>
 Date: Mon, 16 Nov 2026 18:47:56 +0100
-Subject: [PATCH 3/4] feat(proxy): support outbound system proxies
+Subject: [PATCH 3/7] feat(proxy): support outbound system proxies
 
 Enable Reqwest system proxy support for outbound clients, document the proxy context required for Windows services, and verify that the GitHub OAuth client sends HTTPS requests through HTTPS_PROXY.
 ---
@@ -161,6 +161,3 @@ index 05654cf6..395c7840 100644
  ## Register the workspace App and connect a project
  
  1. Open **Settings → GitHub** as a workspace owner or admin.
--- 
-2.56.0.windows.4
-

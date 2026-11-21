@@ -8,7 +8,9 @@ Base: **Orbit v0.3.0**, commit `a7402204c7cadcac4747cbf47a60685a20f59498`.
 | `0002-feat-github-enterprise-host.patch` | #82 | Configurable GHES/GHEC host, derived endpoints, host binding |
 | `0003-feat-outbound-proxy-support.patch` | local | Reqwest system-proxy support for outbound requests |
 | `0004-feat-manual-github-app-registration.patch` | local | Manual GitHub App registration API for GHES without manifest flow |
-| `0005-feat-bridge-device-enrollment.patch` | local | Worbit bridge device registry, enrollment API and `.invalid` mailbox |
+| `0005-feat-bridge-device-enrollment.patch` | local | Torbit bridge device registry, enrollment API and `.invalid` mailbox |
+| `0006-feat-bridge-signed-delivery.patch` | local | Signed bridge delivery endpoint |
+| `0007-feat-web-fork-notice.patch` | local | Dismissible "unofficial fork of Orbit" toast shown when the web app opens |
 
 Polling is not included.
 
@@ -33,7 +35,7 @@ The env file is recorded in the service launch arguments, so a reboot does not
 depend on machine-wide `ORBIT_*` variables:
 
 ```text
-orbit.exe __service-run --name Orbit --env-file C:\ProgramData\Worbit\config\worbit.env
+orbit.exe __service-run --name Orbit --env-file C:\ProgramData\Torbit\config\torbit.env
 ```
 
 ## 0002 details
@@ -56,14 +58,21 @@ Code:
 The binding table is created by code, not by a migration:
 
 ```sql
-CREATE TABLE IF NOT EXISTS worbit_github_host_binding (
+CREATE TABLE IF NOT EXISTS torbit_github_host_binding (
     singleton BIGINT PRIMARY KEY CHECK (singleton = 1),
     origin TEXT NOT NULL
 );
 ```
 
-That keeps `schema_migrations` at the stock Orbit version. The `worbit_` prefix
+That keeps `schema_migrations` at the stock Orbit version. The `torbit_` prefix
 avoids a collision if upstream ever adds its own binding table.
+
+Before the rebrand the table was `worbit_github_host_binding`. At startup, in one
+write transaction, an old table is renamed with `ALTER TABLE ... RENAME TO` when
+the new one does not exist (this keeps the row, so the host binding stays
+immutable); otherwise the new table is created if missing. The step is
+idempotent and safe on fresh installs. A worbit build cannot find the renamed
+table, see `docs/upgrade.md`.
 
 ## 0003 details
 
@@ -103,7 +112,7 @@ After registration, install the app at:
 
 ## 0005 details
 
-Device enrollment for the Worbit Outlook bridge (spec #6, see `docs/bridge-spike.md` and
+Device enrollment for the Torbit Outlook bridge (spec #6, see `docs/bridge-spike.md` and
 `docs/bridge-signing.md`). Off unless `ORBIT_MAIL_BRIDGE_REGISTRY_PATH` is set and mail is
 on for the instance; then the routes answer 404.
 
@@ -129,7 +138,7 @@ Use `git format-patch` from the authoring fork; do not edit the `.patch` file.
 
 ```bash
 git format-patch v0.3.0..release/cx-v0.3.0 \
-  --output-directory ../worbit/patches
+  --output-directory ../torbit/patches
 ```
 
 Keep the subject, author, date, and body. Rename to
@@ -144,6 +153,16 @@ Keep the subject, author, date, and body. Rename to
 3. Build and run the Windows tests.
 4. Re-export the patch and rerun `verify.ps1`.
 
-Do not add a custom migration for worbit-only schema. Create an unmanaged
-`worbit_*` table at startup instead. Upstream is already past `0099` on `main`;
+Do not add a custom migration for torbit-only schema. Create an unmanaged
+`torbit_*` table at startup instead. Upstream is already past `0099` on `main`;
 a custom migration makes the database unreadable by stock Orbit.
+
+## 0007 details
+
+`apps/web/src/app/ForkNotice.tsx` shows a toast when the web app opens: "torbit is
+Torben's unofficial fork of Orbit and is not affiliated with or supported by
+coollabsio." It links upstream Orbit and this repository. Dismissing it (button,
+close or swipe) stores `torbit:fork-notice-dismissed:v1` in `localStorage`; with
+blocked storage it shows every time. The logic is in `forkNoticeState.ts`, with
+unit tests. Orbit has no About or version page, so there is nothing else to
+change. The mobile app is not built by this repository, so it is not ported.

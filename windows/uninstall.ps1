@@ -1,8 +1,9 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:ProgramFiles "Worbit"),
-    [string]$DataDir = (Join-Path $env:ProgramData "Worbit"),
+    # Existing installs keep the pre-rebrand "Worbit" folders; new installs use "Torbit".
+    [string]$InstallDir = $(if ((Test-Path (Join-Path $env:ProgramFiles "Worbit")) -and -not (Test-Path (Join-Path $env:ProgramFiles "Torbit"))) { Join-Path $env:ProgramFiles "Worbit" } else { Join-Path $env:ProgramFiles "Torbit" }),
+    [string]$DataDir = $(if ((Test-Path (Join-Path $env:ProgramData "Worbit")) -and -not (Test-Path (Join-Path $env:ProgramData "Torbit"))) { Join-Path $env:ProgramData "Worbit" } else { Join-Path $env:ProgramData "Torbit" }),
     [string]$ServiceName = "Orbit",
     [switch]$RemoveFiles
 )

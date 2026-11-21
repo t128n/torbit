@@ -78,8 +78,8 @@ jobs:
       - name: Native service install/start/stop test
         shell: powershell
         run: |
-          $install = Join-Path $env:ProgramFiles "WorbitTest"
-          $data = Join-Path $env:ProgramData "WorbitTest"
+          $install = Join-Path $env:ProgramFiles "TorbitTest"
+          $data = Join-Path $env:ProgramData "TorbitTest"
           New-Item -ItemType Directory -Force $data | Out-Null
           $envFile = Join-Path $data "test.env"
           @"
@@ -97,7 +97,7 @@ jobs:
             -Source ./.work/orbit/target/release/orbit.exe `
             -InstallDir $install `
             -DataDir $data `
-            -ServiceName WorbitTest `
+            -ServiceName TorbitTest `
             -EnvFile $envFile
 
           $appKey = Join-Path $data "app.key"
@@ -124,24 +124,24 @@ jobs:
             throw "health check did not return 200"
           }
 
-          Stop-Service WorbitTest
-          (Get-Service WorbitTest).WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
+          Stop-Service TorbitTest
+          (Get-Service TorbitTest).WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
 
       - name: Remove the test service
         if: always()
         shell: pwsh
         run: |
-          $install = Join-Path $env:ProgramFiles "WorbitTest"
-          $data = Join-Path $env:ProgramData "WorbitTest"
+          $install = Join-Path $env:ProgramFiles "TorbitTest"
+          $data = Join-Path $env:ProgramData "TorbitTest"
           try {
-            ./windows/uninstall.ps1 -InstallDir $install -DataDir $data -ServiceName WorbitTest -RemoveFiles
+            ./windows/uninstall.ps1 -InstallDir $install -DataDir $data -ServiceName TorbitTest -RemoveFiles
           } catch {
             Write-Warning $_
           }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: worbit-windows
+          name: torbit-windows
           path: |
             artifacts/*.zip
             artifacts/SHA256SUMS

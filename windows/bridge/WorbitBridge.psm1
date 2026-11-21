@@ -30,8 +30,13 @@ function Write-BridgeJsonFile([string]$Path, $Object) {
     $json = $Object | ConvertTo-Json -Depth 6
     $tmp = $Path + '.tmp'
     [IO.File]::WriteAllText($tmp, $json, (New-Object Text.UTF8Encoding($false)))
-    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
-    Move-Item -LiteralPath $tmp -Destination $Path
+    # Replace swaps the file in one step, so a crash never leaves the target missing.
+    try {
+        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($tmp, $Path, [NullString]::Value) }
+        else { [IO.File]::Move($tmp, $Path) }
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 function Read-BridgeJsonFile([string]$Path) {
@@ -224,15 +229,25 @@ function Get-KeptTransportHeaders([string]$Raw) {
     foreach ($line in ($Raw -split "\r\n|\n|\r")) {
         if ($line -eq '') { break }
         if ($line -match '^[ \t]') {
-            if (-not $skip -and $kept.Count -gt 0) { $kept.Add((Format-HeaderText $line)) }
+            # continuation: keep the folding whitespace, encode only the text after it
+            if (-not $skip -and $kept.Count -gt 0) {
+                $text = $line.TrimStart(' ', "`t")
+                $lead = $line.Substring(0, $line.Length - $text.Length)
+                $kept.Add($lead + (Format-HeaderText $text))
+            }
             continue
         }
         $idx = $line.IndexOf(':')
         if ($idx -lt 1) { $skip = $true; continue }
-        $name = $line.Substring(0, $idx).Trim().ToLowerInvariant()
+        $rawName = $line.Substring(0, $idx)
+        $name = $rawName.Trim().ToLowerInvariant()
+        # a field name must be printable ASCII without spaces or colons; anything else is dropped
+        if ($rawName -cnotmatch '^[\x21-\x39\x3B-\x7E]+$') { $skip = $true; continue }
         if ($script:DroppedHeaders -contains $name) { $skip = $true; continue }
         $skip = $false
-        $kept.Add((Format-HeaderText $line))
+        $value = $line.Substring($idx + 1)
+        if (Test-PlainAscii $value) { $kept.Add($line) }
+        else { $kept.Add($rawName + ': ' + (Format-HeaderText $value.TrimStart(' ', "`t"))) }
     }
     return , $kept.ToArray()
 }
@@ -246,9 +261,19 @@ function Format-MimeDate([DateTime]$Utc) {
     return $Utc.ToUniversalTime().ToString('ddd, dd MMM yyyy HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) + ' +0000'
 }
 
+# The attachments of an item: its Attachments, or, for an item from an adapter that loads them lazily,
+# the result of its LoadAttachments scriptblock (called at most once per conversion).
+function Get-ItemAttachments($Item) {
+    if ($Item.PSObject.Properties['Attachments']) { return $Item.Attachments }
+    if ($Item.PSObject.Properties['LoadAttachments'] -and $Item.LoadAttachments) { return (& $Item.LoadAttachments) }
+    return $null
+}
+
 # Item contract (what an Outlook adapter returns): EntryId, Subject, SenderName, SenderEmail, To,
-# ReceivedTime (UTC), TransportHeaders, Body (text), HtmlBody, Attachments[] { FileName, MimeType,
-# ContentId, IsInline, Bytes }. Same item in, same bytes out. Output is pure 7-bit ASCII with CRLF.
+# ReceivedTime (UTC), TransportHeaders, Body (text), HtmlBody, and either Attachments[] { FileName, MimeType,
+# ContentId, IsInline, Bytes } or LoadAttachments (a scriptblock that returns them). Optional Size: the
+# item's size in bytes; an item over 2 MiB is skipped without loading attachments. Same item in, same
+# bytes out. Output is pure 7-bit ASCII with CRLF.
 function ConvertTo-MimeMessage {
     param([Parameter(Mandatory)]$Item)
     $lines = New-Object Collections.Generic.List[string]
@@ -273,7 +298,7 @@ function ConvertTo-MimeMessage {
 
     $text = [string]$Item.Body
     $html = [string]$Item.HtmlBody
-    $atts = @($Item.Attachments | Where-Object { $_ })
+    $atts = @(Get-ItemAttachments $Item | Where-Object { $_ })
     $hasHtml = [bool]$html
     $hasText = [bool]$text
 
@@ -365,6 +390,12 @@ function Send-BridgeMessage {
 
 function Send-BridgeItem {
     param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][scriptblock]$Signer, [Parameter(Mandatory)]$Item)
+    $size = Get-PropOrNull $Item 'Size'
+    if ($size -and [int64]$size -gt $script:MaxBodyBytes) {
+        # clearly over the limit: do not load attachments or build the message
+        Write-BridgeLog ('item {0} -> Permanent (413, too large)' -f $Item.EntryId)
+        return [pscustomobject]@{ Outcome = 'Permanent'; Status = 413; Reason = 'Message is larger than 2 MiB.' }
+    }
     $mime = ConvertTo-MimeMessage -Item $Item
     $r = Send-BridgeMessage -Config $Config -Signer $Signer -Mime $mime
     Write-BridgeLog ('item {0} -> {1} ({2})' -f $Item.EntryId, $r.Outcome, $r.Status)
@@ -372,6 +403,27 @@ function Send-BridgeItem {
 }
 
 # ---------------------------------------------------------------- enrollment
+
+# After a new enrollment the earlier 401/404 skips (the old device was rejected) are stale: forget them so
+# the next sweep sends those items again, and move the cursor back to the oldest of them. Skips for any
+# other reason (413, other 4xx) and delivered items stay recorded.
+function Reset-AuthSkippedItems {
+    if (-not (Read-BridgeState)) { return }
+    Update-BridgeRunState {
+        param($s)
+        $oldest = $null
+        foreach ($id in @($s.items.Keys)) {
+            $rec = $s.items[$id]
+            if ($rec.outcome -ne 'skipped' -or ($rec.status -ne 401 -and $rec.status -ne 404)) { continue }
+            if ($rec.ContainsKey('received')) {
+                $t = ConvertTo-UtcDate $rec.received
+                if ($null -eq $oldest -or $t -lt $oldest) { $oldest = $t }
+            }
+            $s.items.Remove($id)
+        }
+        if ($oldest -and $s.cursor -and (ConvertTo-UtcDate $s.cursor) -gt $oldest) { $s.cursor = $oldest.ToString('o') }
+    }
+}
 
 # Credential is an Orbit session token (sent as the session cookie) or an API token (Bearer).
 # It is used for this call only and is never stored or logged.
@@ -410,6 +462,7 @@ function Invoke-BridgeEnroll {
             enrolled_at = [DateTime]::UtcNow.ToString('o')
         }
         Write-BridgeConfig $config
+        if ($Force) { Reset-AuthSkippedItems }
         Write-BridgeLog ('enrolled device {0} with {1}' -f $config.device_id, $usedProvider)
         return $config
     } catch {
@@ -448,7 +501,10 @@ function Get-BridgeRunState {
     $items = Get-PropOrNull $raw 'items'
     if ($items) {
         foreach ($p in $items.PSObject.Properties) {
-            $s.items[$p.Name] = @{ outcome = [string]$p.Value.outcome; status = [int]$p.Value.status; at = [string]$p.Value.at }
+            $rec = @{ outcome = [string]$p.Value.outcome; status = [int]$p.Value.status; at = [string]$p.Value.at }
+            $received = Get-PropOrNull $p.Value 'received'
+            if ($received) { $rec.received = (ConvertTo-UtcDate $received).ToString('o') }
+            $s.items[$p.Name] = $rec
         }
     }
     $s.pending = @(@(Get-PropOrNull $raw 'pending') | Where-Object { $_ })
@@ -494,6 +550,8 @@ function Invoke-BridgeSweep {
         if ($r.Outcome -eq 'Retry') { $halted = $true; $unresolved.Add($item); continue }
         if ($r.Outcome -eq 'Delivered') { $outcome = 'delivered'; $res.Delivered++ } else { $outcome = 'skipped'; $res.Skipped++ }
         $rec = @{ outcome = $outcome; status = [int]$r.Status; at = [DateTime]::UtcNow.ToString('o') }
+        # the received time of a skipped item lets enroll -Force send it again after an auth failure
+        if ($outcome -eq 'skipped') { $rec.received = (ConvertTo-UtcDate $item.ReceivedTime).ToString('o') }
         Update-BridgeRunState { param($s) $s.items[$id] = $rec }.GetNewClosure()
         $known[$id] = $rec
     }
@@ -637,6 +695,24 @@ function Get-OutlookErrorMessage($ErrorRecord) {
     return 'The bridge could not talk to Outlook. Make sure classic Outlook is installed and signed in, then try again.'
 }
 
+# The attachments of one Outlook mail item, read into memory (one temp file at a time, always removed).
+function Get-OutlookAttachments($MailItem) {
+    $atts = New-Object Collections.Generic.List[object]
+    foreach ($a in $MailItem.Attachments) {
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ('worbit-' + [guid]::NewGuid().ToString('N'))
+        try {
+            $a.SaveAsFile($tmp)
+            $cid = ''
+            $mime = ''
+            try { $cid = [string]$a.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x3712001F') } catch { }
+            try { $mime = [string]$a.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x370E001F') } catch { }
+            $atts.Add([pscustomobject]@{ FileName = [string]$a.FileName; MimeType = $mime; ContentId = $cid
+                    IsInline = [bool]$cid; Bytes = [IO.File]::ReadAllBytes($tmp) })
+        } finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
+    return $atts.ToArray()
+}
+
 # Adapter contract used by the run command: an object with
 #   GetInboxItems([DateTime]$Since) -> items (shape: see ConvertTo-MimeMessage), oldest first.
 # This is the real Outlook COM adapter (manual testing only). Tests pass a fake with the same method.
@@ -686,23 +762,15 @@ function New-OutlookAdapter {
             try {
                 $headers = ''
                 try { $headers = [string]$mi.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x007D001F') } catch { }
-                $atts = New-Object Collections.Generic.List[object]
-                foreach ($a in $mi.Attachments) {
-                    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('worbit-' + [guid]::NewGuid().ToString('N'))
-                    try {
-                        $a.SaveAsFile($tmp)
-                        $cid = ''
-                        $mime = ''
-                        try { $cid = [string]$a.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x3712001F') } catch { }
-                        try { $mime = [string]$a.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x370E001F') } catch { }
-                        $atts.Add([pscustomobject]@{ FileName = [string]$a.FileName; MimeType = $mime; ContentId = $cid
-                                IsInline = [bool]$cid; Bytes = [IO.File]::ReadAllBytes($tmp) })
-                    } finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
-                }
+                # Attachments are loaded only when the item is delivered (LoadAttachments), and not at all for an
+                # item whose Size is over the limit. Size is the whole item in bytes, attachments included.
+                $loader = ${function:Get-OutlookAttachments}
+                $loadAttachments = { & $loader $mi }.GetNewClosure()
                 $out.Add([pscustomobject]@{ EntryId = [string]$mi.EntryID; Subject = [string]$mi.Subject
                         SenderName = [string]$mi.SenderName; SenderEmail = [string]$mi.SenderEmailAddress; To = [string]$mi.To
                         ReceivedTime = ([DateTime]$mi.ReceivedTime).ToUniversalTime(); TransportHeaders = $headers
-                        Body = [string]$mi.Body; HtmlBody = [string]$mi.HTMLBody; Attachments = $atts.ToArray() })
+                        Body = [string]$mi.Body; HtmlBody = [string]$mi.HTMLBody; Size = [int64]$mi.Size
+                        LoadAttachments = $loadAttachments })
             } catch { Write-BridgeLog ('skipped one item: ' + $_.Exception.GetType().Name) }
         }
         return , $out.ToArray()

@@ -1,24 +1,24 @@
-From 05cceac204c305c931a68604190c3744f0617577 Mon Sep 17 00:00:00 2001
+From f36b2139fc35ca86cbed0c2eb6b328ce95134ffb Mon Sep 17 00:00:00 2001
 From: Torben Haack <t128n@ipv4.8shield.net>
 Date: Sat, 21 Nov 2026 17:30:58 +0100
 Subject: [PATCH] feat(mail): add signed Worbit bridge delivery endpoint
 
 ---
- apps/server/src/mail_bridge.rs            | 160 ++++++
+ apps/server/src/mail_bridge.rs            | 216 ++++++
  apps/server/src/mail_intake.rs            |   3 +
- apps/server/src/mail_routes/bridge.rs     | 172 +++++-
- apps/server/src/mail_routes/mod.rs        |  27 +
+ apps/server/src/mail_routes/bridge.rs     | 265 +++++++-
+ apps/server/src/mail_routes/mod.rs        |  59 +-
  apps/server/src/openapi.rs                |   1 +
- apps/server/tests/mail_bridge_delivery.rs | 631 ++++++++++++++++++++++
+ apps/server/tests/mail_bridge_delivery.rs | 773 ++++++++++++++++++++++
  apps/server/tests/openapi_contract.rs     |   4 +-
- 7 files changed, 995 insertions(+), 3 deletions(-)
+ 7 files changed, 1314 insertions(+), 7 deletions(-)
  create mode 100644 apps/server/tests/mail_bridge_delivery.rs
 
 diff --git a/apps/server/src/mail_bridge.rs b/apps/server/src/mail_bridge.rs
-index 07df6432..931bb507 100644
+index b4737000..82f26398 100644
 --- a/apps/server/src/mail_bridge.rs
 +++ b/apps/server/src/mail_bridge.rs
-@@ -379,3 +379,163 @@ fn parse(value: &str) -> Result<Id, sqlx::Error> {
+@@ -382,3 +382,219 @@ fn parse(value: &str) -> Result<Id, sqlx::Error> {
          .parse()
          .map_err(|error| sqlx::Error::Decode(Box::new(error)))
  }
@@ -36,6 +36,22 @@ index 07df6432..931bb507 100644
 +pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 +/// Request bodies read at once.
 +const BODIES_AT_ONCE: usize = 4;
++/// How long a delivery waits for one of those slots before it answers 503.
++const SLOT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
++/// How long reading one body may take before the delivery answers 408. A slow sender cannot hold
++/// a slot longer than this.
++const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
++
++/// Why a delivery's body could not be read.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum BodyError {
++    /// More than [`MAX_MESSAGE_BYTES`].
++    TooLarge,
++    /// Not complete within the read timeout.
++    TimedOut,
++    /// The connection broke off or the body was malformed.
++    Broken,
++}
 +
 +/// Why a delivery was refused. Logged by the handler; the response never tells which.
 +#[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,6 +133,8 @@ index 07df6432..931bb507 100644
 +    intake: crate::mail_intake::MailIntake,
 +    nonces: std::sync::Mutex<std::collections::HashMap<(String, String), i64>>,
 +    bodies: tokio::sync::Semaphore,
++    slot_wait: std::time::Duration,
++    read_timeout: std::time::Duration,
 +    /// Tests only: a fixed clock, unix seconds.
 +    fixed_now: Option<i64>,
 +}
@@ -131,8 +149,25 @@ index 07df6432..931bb507 100644
 +            ),
 +            nonces: std::sync::Mutex::new(std::collections::HashMap::new()),
 +            bodies: tokio::sync::Semaphore::new(BODIES_AT_ONCE),
++            slot_wait: SLOT_WAIT,
++            read_timeout: BODY_READ_TIMEOUT,
 +            fixed_now: None,
 +        }
++    }
++
++    /// Tests only: `bodies` bodies at once, a wait for a slot and a time to read a body.
++    #[doc(hidden)]
++    #[must_use]
++    pub fn with_limits(
++        mut self,
++        bodies: usize,
++        slot_wait: std::time::Duration,
++        read_timeout: std::time::Duration,
++    ) -> Self {
++        self.bodies = tokio::sync::Semaphore::new(bodies);
++        self.slot_wait = slot_wait;
++        self.read_timeout = read_timeout;
++        self
 +    }
 +
 +    /// Tests only: the server's clock reads `now` (unix seconds).
@@ -149,8 +184,29 @@ index 07df6432..931bb507 100644
 +            .unwrap_or_else(|| TimestampMillis::now().as_millis() / 1000)
 +    }
 +
++    /// A slot for reading one body; `None` when none is free within the wait (answer 503).
 +    pub async fn body_permit(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
-+        self.bodies.acquire().await.ok()
++        tokio::time::timeout(self.slot_wait, self.bodies.acquire())
++            .await
++            .ok()?
++            .ok()
++    }
++
++    /// Reads the whole body, at most [`MAX_MESSAGE_BYTES`], within the read timeout.
++    pub async fn read_body(&self, body: axum::body::Body) -> Result<axum::body::Bytes, BodyError> {
++        match tokio::time::timeout(
++            self.read_timeout,
++            axum::body::to_bytes(body, MAX_MESSAGE_BYTES),
++        )
++        .await
++        {
++            Err(_) => Err(BodyError::TimedOut),
++            Ok(Ok(bytes)) => Ok(bytes),
++            Ok(Err(error)) if crate::attachment_routes::has_length_limit(&error) => {
++                Err(BodyError::TooLarge)
++            }
++            Ok(Err(_)) => Err(BodyError::Broken),
++        }
 +    }
 +
 +    #[must_use]
@@ -204,7 +260,7 @@ index 64c4d630..3afef63b 100644
      }
  }
 diff --git a/apps/server/src/mail_routes/bridge.rs b/apps/server/src/mail_routes/bridge.rs
-index 37711961..07aeb897 100644
+index 37711961..b5f1ddcb 100644
 --- a/apps/server/src/mail_routes/bridge.rs
 +++ b/apps/server/src/mail_routes/bridge.rs
 @@ -5,8 +5,10 @@
@@ -223,7 +279,7 @@ index 37711961..07aeb897 100644
  use super::{MailState, RequestIdExtension, problem};
  use crate::mail_bridge::{
 -    BridgeMailboxError, BridgeRegistry, DeviceRecord, ensure_bridge_mailbox, normalize_public_key,
-+    BridgeMailboxError, BridgeRegistry, DeviceRecord, MAX_MESSAGE_BYTES, Refusal, SignedHeaders,
++    BodyError, BridgeMailboxError, BridgeRegistry, DeviceRecord, Refusal, SignedHeaders,
 +    WINDOW_SECS, ensure_bridge_mailbox, normalize_public_key, signature_valid, signed_string,
  };
 +use crate::mail_intake::{InboundMessage, IntakeError, Recipient, Source};
@@ -236,22 +292,24 @@ index 37711961..07aeb897 100644
  
  /// An enrolled device. The public key stays in the registry.
  #[derive(Serialize, ToSchema)]
-@@ -212,6 +218,170 @@ pub(crate) async fn list_bridge_devices(
+@@ -212,6 +218,263 @@ pub(crate) async fn list_bridge_devices(
      Ok(Json(devices))
  }
  
 +/// Delivers one message from an enrolled device (`docs/bridge-signing.md`, format
 +/// `worbit-bridge-v1`). The body is the raw MIME message. Checks, in order: the bridge is on and
-+/// the device exists (404), it is not revoked (401), the headers, the signature, the timestamp
-+/// window and the nonce (401), the size (413), then storage (503 to retry, 200 stored). The
-+/// message always goes to the device's mailbox; recipients in the message are ignored. A 401 never
-+/// says which check failed; the reason is logged, without message content.
++/// the device exists (404), it is not revoked (401, code `device_revoked`), the headers (401), a
++/// body slot (503) and the body (413 over the size, 408 too slow, 400 broken), the signature, the
++/// timestamp window, the device's member and mailbox being active and the nonce (401), then
++/// storage (503 to retry, 200 stored). The message always goes to the device's mailbox;
++/// recipients in the message are ignored. Except for a revoked device, a 401 never says which
++/// check failed; the reason is logged, without message content. 408 and 503 are retryable.
 +#[utoipa::path(
 +    post,
 +    path = "/api/v1/mail/inbound/bridge/{device_id}",
 +    params(("device_id" = String, Path)),
 +    request_body(content = String, content_type = "message/rfc822", description = "The raw message"),
-+    responses((status = 200), (status = 401), (status = 404), (status = 413), (status = 503))
++    responses((status = 200), (status = 400), (status = 401), (status = 404), (status = 408), (status = 413), (status = 503))
 +)]
 +pub(crate) async fn deliver_bridge_message(
 +    State(state): State<MailState>,
@@ -274,10 +332,12 @@ index 37711961..07aeb897 100644
 +            return bridge_reply(StatusCode::SERVICE_UNAVAILABLE, "try again later");
 +        }
 +    }
++    // the id comes from the URL: never log it as sent
++    let logged = log_safe(&device_id);
 +    let device = match registry.lookup(&device_id).await {
 +        Ok(Some(device)) => device,
 +        Ok(None) => {
-+            tracing::warn!(device = %device_id, "bridge delivery refused: unknown device");
++            tracing::warn!(device = %logged, "bridge delivery refused: unknown device");
 +            return bridge_reply(StatusCode::NOT_FOUND, "not found");
 +        }
 +        Err(error) => {
@@ -286,32 +346,64 @@ index 37711961..07aeb897 100644
 +        }
 +    };
 +    if device.revoked_at.is_some() {
-+        return refuse(&device_id, "revoked");
++        tracing::warn!(device = %logged, "bridge delivery refused: revoked");
++        // the one 401 that says why: the bridge stops retrying and asks the user to enroll again
++        return (
++            StatusCode::UNAUTHORIZED,
++            Json(serde_json::json!({
++                "error": "device revoked",
++                "code": "device_revoked",
++                "detail": "This device was revoked. Enroll the bridge again to deliver mail.",
++            })),
++        )
++            .into_response();
 +    }
 +    let signed = match signed_headers(&headers) {
 +        Ok(signed) => signed,
-+        Err(refusal) => return refuse(&device_id, reason(refusal)),
++        Err(refusal) => return refuse(&logged, reason(refusal)),
 +    };
 +
 +    let Some(_permit) = delivery.body_permit().await else {
++        tracing::warn!(device = %logged, "bridge delivery: no free body slot");
 +        return bridge_reply(StatusCode::SERVICE_UNAVAILABLE, "try again later");
 +    };
-+    let Ok(raw) = axum::body::to_bytes(body, MAX_MESSAGE_BYTES).await else {
-+        // the signature cannot be checked without the whole body
-+        tracing::warn!(device = %device_id, "bridge delivery refused: body over the limit");
-+        return bridge_reply(StatusCode::PAYLOAD_TOO_LARGE, "message too large");
++    // the signature cannot be checked without the whole body
++    let raw = match delivery.read_body(body).await {
++        Ok(raw) => raw,
++        Err(BodyError::TooLarge) => {
++            tracing::warn!(device = %logged, "bridge delivery refused: body over the limit");
++            return bridge_reply(StatusCode::PAYLOAD_TOO_LARGE, "message too large");
++        }
++        Err(BodyError::TimedOut) => {
++            tracing::warn!(device = %logged, "bridge delivery: body too slow");
++            return bridge_reply(StatusCode::REQUEST_TIMEOUT, "request timed out");
++        }
++        Err(BodyError::Broken) => {
++            tracing::warn!(device = %logged, "bridge delivery refused: body unreadable");
++            return bridge_reply(StatusCode::BAD_REQUEST, "bad request");
++        }
 +    };
 +
 +    let text = signed_string(&signed.timestamp_text, &signed.nonce, &device_id, &raw);
 +    if !signature_valid(&device.public_key, &text, &signed.signature) {
-+        return refuse(&device_id, reason(Refusal::BadSignature));
++        return refuse(&logged, reason(Refusal::BadSignature));
 +    }
 +    let now = delivery.now_secs();
 +    if (now - signed.timestamp).abs() > WINDOW_SECS {
-+        return refuse(&device_id, reason(Refusal::Expired));
++        return refuse(&logged, reason(Refusal::Expired));
++    }
++    // a signed request of a device whose member or mailbox is gone is refused; checked after the
++    // signature, so an anonymous caller cannot cause database reads
++    match owner_active(&state, &device).await {
++        Ok(true) => {}
++        Ok(false) => return refuse(&logged, "member or mailbox no longer active"),
++        Err(error) => {
++            tracing::warn!(%error, "bridge delivery: owner check");
++            return bridge_reply(StatusCode::SERVICE_UNAVAILABLE, "try again later");
++        }
 +    }
 +    if !delivery.remember_nonce(&device_id, &signed.nonce, now) {
-+        return refuse(&device_id, reason(Refusal::Replay));
++        return refuse(&logged, reason(Refusal::Replay));
 +    }
 +
 +    let received = chrono::Utc::now().to_rfc2822();
@@ -349,7 +441,7 @@ index 37711961..07aeb897 100644
 +        Err(error) => {
 +            // not stored: the bridge may send it again with the same nonce
 +            delivery.forget_nonce(&device_id, &signed.nonce);
-+            tracing::warn!(device = %device_id, %error, "bridge delivery not stored");
++            tracing::warn!(device = %logged, %error, "bridge delivery not stored");
 +            bridge_reply(StatusCode::SERVICE_UNAVAILABLE, "try again later")
 +        }
 +    }
@@ -394,10 +486,67 @@ index 37711961..07aeb897 100644
 +    }
 +}
 +
-+/// Logs why (never the message) and answers the same for every reason.
-+fn refuse(device_id: &str, reason: &str) -> Response {
-+    tracing::warn!(device = %device_id, reason, "bridge delivery refused");
++/// Logs why (never the message) and answers the same for every reason. `device` is [`log_safe`].
++fn refuse(device: &str, reason: &str) -> Response {
++    tracing::warn!(device = %device, reason, "bridge delivery refused");
 +    bridge_reply(StatusCode::UNAUTHORIZED, "unauthorized")
++}
++
++/// The longest device id text that is logged.
++const LOGGED_ID_CHARS: usize = 64;
++
++/// A device id from the URL, safe for a log line: cut to [`LOGGED_ID_CHARS`], and anything but
++/// letters, digits, `-` and `_` (line breaks, control characters) replaced by `?`.
++fn log_safe(device_id: &str) -> String {
++    let mut text: String = device_id
++        .chars()
++        .take(LOGGED_ID_CHARS)
++        .map(|c| {
++            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
++                c
++            } else {
++                '?'
++            }
++        })
++        .collect();
++    if device_id.chars().count() > LOGGED_ID_CHARS {
++        text.push_str("...");
++    }
++    text
++}
++
++/// Whether the device's member is still a full member of its workspace and the mailbox it
++/// delivers to is active.
++async fn owner_active(state: &MailState, device: &DeviceRecord) -> Result<bool, sqlx::Error> {
++    let pool = state.mail.database().pool();
++    if membership::actor(pool, device.workspace_id, device.user_id)
++        .await?
++        .is_none()
++    {
++        return Ok(false);
++    }
++    let status: Option<String> = sqlx::query_scalar("SELECT status FROM mailboxes WHERE id = $1")
++        .bind(device.mailbox_id.to_string())
++        .fetch_optional(pool)
++        .await?;
++    Ok(status.as_deref() == Some("active"))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::log_safe;
++
++    #[test]
++    fn a_logged_device_id_has_no_line_breaks_and_is_short() {
++        let hostile = format!("abc\r\nINFO forged line\u{1b}[31m{}", "x".repeat(500));
++        let logged = log_safe(&hostile);
++        assert!(!logged.contains(['\r', '\n', '\u{1b}', ' ']));
++        assert!(logged.chars().count() <= 67, "{logged}");
++        assert_eq!(
++            log_safe("0f9e8d7c-6b5a-4c3d-9e2f-1a0b9c8d7e6f"),
++            "0f9e8d7c-6b5a-4c3d-9e2f-1a0b9c8d7e6f"
++        );
++    }
 +}
 +
 +fn bridge_reply(status: StatusCode, message: &str) -> Response {
@@ -408,7 +557,7 @@ index 37711961..07aeb897 100644
  /// owners and admins can revoke it; for anyone else the device does not exist. Revoking a revoked
  /// device succeeds.
 diff --git a/apps/server/src/mail_routes/mod.rs b/apps/server/src/mail_routes/mod.rs
-index a1f33ee5..eaee5c4b 100644
+index a1f33ee5..f557e696 100644
 --- a/apps/server/src/mail_routes/mod.rs
 +++ b/apps/server/src/mail_routes/mod.rs
 @@ -63,6 +63,8 @@ pub struct MailState {
@@ -428,44 +577,69 @@ index a1f33ee5..eaee5c4b 100644
          }
      }
  
-@@ -94,6 +97,11 @@ impl MailState {
+@@ -94,14 +97,57 @@ impl MailState {
          mut self,
          registry: Option<Arc<crate::mail_bridge::BridgeRegistry>>,
      ) -> Self {
-+        self.bridge_delivery = registry.as_ref().map(|_| {
-+            Arc::new(crate::mail_bridge::BridgeDelivery::new(Arc::clone(
-+                &self.mail,
-+            )))
-+        });
-         self.bridge = registry;
-         self
-     }
-@@ -101,10 +109,24 @@ impl MailState {
-     /// Turns on the Worbit bridge device routes (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`).
-     #[must_use]
-     pub fn with_bridge(mut self, registry: Arc<crate::mail_bridge::BridgeRegistry>) -> Self {
-+        self.bridge_delivery = Some(Arc::new(crate::mail_bridge::BridgeDelivery::new(
-+            Arc::clone(&self.mail),
-+        )));
-         self.bridge = Some(registry);
-         self
+-        self.bridge = registry;
+-        self
++        match registry {
++            Some(registry) => self.with_bridge(registry),
++            None => {
++                self.bridge = None;
++                self.bridge_delivery = None;
++                self
++            }
++        }
      }
  
+     /// Turns on the Worbit bridge device routes (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`).
+     #[must_use]
+-    pub fn with_bridge(mut self, registry: Arc<crate::mail_bridge::BridgeRegistry>) -> Self {
+-        self.bridge = Some(registry);
++    pub fn with_bridge(self, registry: Arc<crate::mail_bridge::BridgeRegistry>) -> Self {
++        let mut state = self.tuned_delivery(|delivery| delivery);
++        state.bridge = Some(registry);
++        state
++    }
++
 +    /// Tests only: the bridge delivery reads `now` (unix seconds) as the time. Call after
 +    /// [`Self::with_bridge`].
 +    #[doc(hidden)]
 +    #[must_use]
-+    pub fn with_bridge_clock(mut self, now: i64) -> Self {
-+        self.bridge_delivery = Some(Arc::new(
-+            crate::mail_bridge::BridgeDelivery::new(Arc::clone(&self.mail)).with_fixed_now(now),
-+        ));
-+        self
++    pub fn with_bridge_clock(self, now: i64) -> Self {
++        self.tuned_delivery(|delivery| delivery.with_fixed_now(now))
 +    }
 +
-     /// Receives mail from providers' webhooks.
-     #[must_use]
-     pub fn with_inbound(mut self, inbound: Arc<ProviderIntake>) -> Self {
-@@ -186,6 +208,11 @@ pub fn mail_router(state: MailState) -> Router {
++    /// Tests only: bodies at once, wait for a slot and time to read a body. Call after
++    /// [`Self::with_bridge`].
++    #[doc(hidden)]
++    #[must_use]
++    pub fn with_bridge_limits(
++        self,
++        bodies: usize,
++        slot_wait: std::time::Duration,
++        read_timeout: std::time::Duration,
++    ) -> Self {
++        self.tuned_delivery(|delivery| delivery.with_limits(bodies, slot_wait, read_timeout))
++    }
++
++    /// The one place that builds a [`crate::mail_bridge::BridgeDelivery`]: the current one (or a
++    /// new one) with `tune` applied.
++    fn tuned_delivery(
++        mut self,
++        tune: impl FnOnce(crate::mail_bridge::BridgeDelivery) -> crate::mail_bridge::BridgeDelivery,
++    ) -> Self {
++        let current = self
++            .bridge_delivery
++            .take()
++            .and_then(|delivery| Arc::try_unwrap(delivery).ok())
++            .unwrap_or_else(|| crate::mail_bridge::BridgeDelivery::new(Arc::clone(&self.mail)));
++        self.bridge_delivery = Some(Arc::new(tune(current)));
+         self
+     }
+ 
+@@ -186,6 +232,11 @@ pub fn mail_router(state: MailState) -> Router {
              "/api/v1/mail/inbound/{kind}/{provider_id}/mime",
              post(inbound::post_inbound),
          )
@@ -491,10 +665,10 @@ index c3cd2d94..e5d52440 100644
          crate::mail_routes::domains::get_mail_domain,
 diff --git a/apps/server/tests/mail_bridge_delivery.rs b/apps/server/tests/mail_bridge_delivery.rs
 new file mode 100644
-index 00000000..64da72f3
+index 00000000..2156fa1a
 --- /dev/null
 +++ b/apps/server/tests/mail_bridge_delivery.rs
-@@ -0,0 +1,631 @@
+@@ -0,0 +1,773 @@
 +//! `POST /api/v1/mail/inbound/bridge/{device_id}`: signed delivery from a Worbit bridge device.
 +//! The signing cases come from `tests/bridge-vectors.json` of the Worbit repository (the contract
 +//! of `docs/bridge-signing.md`); the state-dependent cases (unknown, revoked, replay, size, off)
@@ -502,11 +676,14 @@ index 00000000..64da72f3
 +
 +use std::path::PathBuf;
 +use std::sync::Arc;
++use std::time::Duration;
 +
-+use axum::body::{Body, to_bytes};
++use axum::body::{Body, Bytes, to_bytes};
 +use axum::http::{Request, StatusCode, header};
 +use base64::Engine as _;
 +use base64::engine::general_purpose::STANDARD;
++use futures_util::StreamExt as _;
++use futures_util::stream;
 +use orbit_platform::{
 +    AttachmentMutationCoordinator, Id, LocalBlobStore, MailMode, TestDatabase, TimestampMillis,
 +    UploadLimits, UploadService,
@@ -549,7 +726,7 @@ index 00000000..64da72f3
 +    }
 +}
 +
-+struct Request2 {
++struct BridgeRequest {
 +    path: String,
 +    headers: Vec<(String, String)>,
 +    body: Vec<u8>,
@@ -574,6 +751,19 @@ index 00000000..64da72f3
 +    }
 +
 +    async fn with(registry_on: bool, mail_on: bool) -> Self {
++        Self::build(registry_on, mail_on, None).await
++    }
++
++    /// Delivery limits: bodies at once, wait for a slot, time to read a body.
++    async fn with_limits(bodies: usize, wait: Duration, read: Duration) -> Self {
++        Self::build(true, true, Some((bodies, wait, read))).await
++    }
++
++    async fn build(
++        registry_on: bool,
++        mail_on: bool,
++        limits: Option<(usize, Duration, Duration)>,
++    ) -> Self {
 +        let vectors = Vectors::load();
 +        let database = TestDatabase::new().await.unwrap();
 +        let identity = Arc::new(IdentityRepository::new((*database).clone()));
@@ -628,6 +818,9 @@ index 00000000..64da72f3
 +            state = state
 +                .with_bridge(Arc::clone(&registry))
 +                .with_bridge_clock(vectors.now());
++            if let Some((bodies, wait, read)) = limits {
++                state = state.with_bridge_limits(bodies, wait, read);
++            }
 +        }
 +
 +        // a second member with a device of their own (the same throwaway key)
@@ -693,7 +886,14 @@ index 00000000..64da72f3
 +        }
 +    }
 +
-+    async fn post(&self, request: &Request2) -> StatusCode {
++    async fn post(&self, request: &BridgeRequest) -> StatusCode {
++        self.post_with(request, Body::from(request.body.clone()))
++            .await
++            .0
++    }
++
++    /// Posts `request` with `body` instead of its own, and returns the status and the reply.
++    async fn post_with(&self, request: &BridgeRequest, body: Body) -> (StatusCode, Value) {
 +        let mut builder = Request::builder().method("POST").uri(&request.path);
 +        for (name, value) in &request.headers {
 +            builder = builder.header(name, value);
@@ -701,23 +901,24 @@ index 00000000..64da72f3
 +        let response = self
 +            .app
 +            .clone()
-+            .oneshot(builder.body(Body::from(request.body.clone())).unwrap())
++            .oneshot(builder.body(body).unwrap())
 +            .await
 +            .unwrap();
 +        let status = response.status();
 +        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-+        // the same neutral body for every 401, and never message content
-+        if status == StatusCode::UNAUTHORIZED {
++        let reply: Value = serde_json::from_slice(&bytes).unwrap();
++        // the same neutral body for every 401 but a revoked device's, and never message content
++        if status == StatusCode::UNAUTHORIZED && reply["code"] != "device_revoked" {
 +            assert_eq!(
 +                String::from_utf8_lossy(&bytes),
 +                r#"{"error":"unauthorized"}"#
 +            );
 +        }
-+        status
++        (status, reply)
 +    }
 +
 +    /// The vector `name` as a request.
-+    fn vector(&self, name: &str) -> (Request2, Value) {
++    fn vector(&self, name: &str) -> (BridgeRequest, Value) {
 +        let vector = self.vectors.0["vectors"]
 +            .as_array()
 +            .unwrap()
@@ -731,7 +932,7 @@ index 00000000..64da72f3
 +            .map(|(name, value)| (name.clone(), value.as_str().unwrap().to_owned()))
 +            .collect();
 +        (
-+            Request2 {
++            BridgeRequest {
 +                path: vector["path"].as_str().unwrap().to_owned(),
 +                headers,
 +                body: STANDARD
@@ -743,13 +944,13 @@ index 00000000..64da72f3
 +    }
 +
 +    /// A request for `device` signed with the vectors' key at `timestamp`.
-+    fn signed(&self, device: &str, timestamp: i64, nonce: &str, body: &[u8]) -> Request2 {
++    fn signed(&self, device: &str, timestamp: i64, nonce: &str, body: &[u8]) -> BridgeRequest {
 +        let signed = format!(
 +            "worbit-bridge-v1\n{timestamp}\n{nonce}\n{device}\n{:x}",
 +            Sha256::digest(body)
 +        );
 +        let signature: Signature = self.vectors.signing_key().sign(signed.as_bytes());
-+        Request2 {
++        BridgeRequest {
 +            path: format!("/api/v1/mail/inbound/bridge/{device}"),
 +            headers: vec![
 +                ("X-Worbit-Timestamp".to_owned(), timestamp.to_string()),
@@ -763,7 +964,7 @@ index 00000000..64da72f3
 +        }
 +    }
 +
-+    fn now_signed(&self, nonce: &str, body: &[u8]) -> Request2 {
++    fn now_signed(&self, nonce: &str, body: &[u8]) -> BridgeRequest {
 +        self.signed(&self.device, self.vectors.now(), nonce, body)
 +    }
 +
@@ -996,7 +1197,7 @@ index 00000000..64da72f3
 +async fn a_forged_request_does_not_use_up_a_nonce() {
 +    let fixture = Fixture::new().await;
 +    let (valid, _) = fixture.vector("valid-simple");
-+    let mut forged = Request2 {
++    let mut forged = BridgeRequest {
 +        path: valid.path.clone(),
 +        headers: valid.headers.clone(),
 +        body: b"tampered".to_vec(),
@@ -1015,8 +1216,52 @@ index 00000000..64da72f3
 +        .await
 +        .unwrap();
 +    let (request, _) = fixture.vector("valid-simple");
++    let (status, reply) = fixture
++        .post_with(&request, Body::from(request.body.clone()))
++        .await;
++    assert_eq!(status, StatusCode::UNAUTHORIZED);
++    // distinct from the neutral 401, so the bridge can stop and tell the user to enroll again
++    assert_eq!(reply["code"], "device_revoked");
++    assert!(
++        reply["detail"].as_str().unwrap().contains("revoked"),
++        "{reply}"
++    );
++    assert_eq!(fixture.receipts().await, 0);
++}
++
++#[tokio::test]
++async fn a_device_whose_member_left_or_whose_mailbox_is_suspended_is_refused() {
++    let fixture = Fixture::new().await;
++    sqlx::query("UPDATE mailboxes SET status = 'suspended' WHERE id = $1")
++        .bind(fixture.owner_mailbox.to_string())
++        .execute(fixture.database.pool())
++        .await
++        .unwrap();
++    let (request, _) = fixture.vector("valid-simple");
 +    assert_eq!(fixture.post(&request).await, StatusCode::UNAUTHORIZED);
 +    assert_eq!(fixture.receipts().await, 0);
++    // an active member and mailbox deliver
++    sqlx::query("UPDATE mailboxes SET status = 'active' WHERE id = $1")
++        .bind(fixture.owner_mailbox.to_string())
++        .execute(fixture.database.pool())
++        .await
++        .unwrap();
++    assert_eq!(fixture.post(&request).await, StatusCode::OK);
++    // a member who is no longer a full member (here: a guest) is refused too
++    sqlx::query(
++        "UPDATE memberships SET role = 'guest' WHERE workspace_id = $1 AND role = 'member'",
++    )
++    .bind(fixture.workspace.to_string())
++    .execute(fixture.database.pool())
++    .await
++    .unwrap();
++    let guest = fixture.signed(
++        OTHER_DEVICE,
++        fixture.vectors.now(),
++        "guest-nonce-00001",
++        b"x",
++    );
++    assert_eq!(fixture.post(&guest).await, StatusCode::UNAUTHORIZED);
 +}
 +
 +#[tokio::test]
@@ -1038,7 +1283,7 @@ index 00000000..64da72f3
 +async fn the_headers_must_be_present_once_and_well_formed() {
 +    let fixture = Fixture::new().await;
 +    let (valid, _) = fixture.vector("valid-simple");
-+    let missing = |name: &str| Request2 {
++    let missing = |name: &str| BridgeRequest {
 +        path: valid.path.clone(),
 +        headers: valid
 +            .headers
@@ -1055,7 +1300,7 @@ index 00000000..64da72f3
 +            "{name}"
 +        );
 +    }
-+    let mut twice = Request2 {
++    let mut twice = BridgeRequest {
 +        path: valid.path.clone(),
 +        headers: valid.headers.clone(),
 +        body: valid.body.clone(),
@@ -1125,6 +1370,77 @@ index 00000000..64da72f3
 +        .await;
 +    assert_eq!(detail["messages"][0]["auth"]["dmarc"], "none");
 +    assert!(detail["messages"][0]["auth"]["aligned_domain"].is_null());
++}
++
++/// A body that sends its first bytes and then never ends.
++fn stalled_body() -> Body {
++    Body::from_stream(
++        stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
++            b"Subject: slow\r\n",
++        ))])
++        .chain(stream::pending()),
++    )
++}
++
++#[tokio::test]
++async fn a_body_that_stalls_is_timed_out_with_408() {
++    let fixture = Fixture::with_limits(4, Duration::from_secs(5), Duration::from_millis(200)).await;
++    let request = fixture.now_signed("stall-nonce-00001", b"Subject: slow\r\n");
++    let (status, _) = fixture.post_with(&request, stalled_body()).await;
++    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
++    assert_eq!(fixture.receipts().await, 0);
++    // a timeout is not a replay: the same nonce works on the retry
++    assert_eq!(fixture.post(&request).await, StatusCode::OK);
++}
++
++#[tokio::test]
++async fn slow_bodies_cannot_hold_every_slot_forever() {
++    let fixture = Arc::new(
++        Fixture::with_limits(1, Duration::from_millis(100), Duration::from_secs(30)).await,
++    );
++    let first = {
++        let fixture = Arc::clone(&fixture);
++        tokio::spawn(async move {
++            let request = fixture.now_signed("hold-nonce-000001", b"Subject: slow\r\n");
++            fixture.post_with(&request, stalled_body()).await.0
++        })
++    };
++    tokio::time::sleep(Duration::from_millis(300)).await;
++    let request = fixture.now_signed("wait-nonce-000002", b"Subject: ok\r\n\r\nx\r\n");
++    assert_eq!(
++        fixture.post(&request).await,
++        StatusCode::SERVICE_UNAVAILABLE
++    );
++    first.abort();
++}
++
++#[tokio::test]
++async fn a_body_that_breaks_off_is_a_bad_request_not_too_large() {
++    let fixture = Fixture::new().await;
++    let request = fixture.now_signed("break-nonce-00001", b"Subject: x\r\n");
++    let body = Body::from_stream(stream::iter([
++        Ok(Bytes::from_static(b"Subject: x\r\n")),
++        Err(std::io::Error::other("connection reset")),
++    ]));
++    let (status, _) = fixture.post_with(&request, body).await;
++    assert_eq!(status, StatusCode::BAD_REQUEST);
++}
++
++#[tokio::test]
++async fn the_receipt_names_the_bridge_and_the_device() {
++    let fixture = Fixture::new().await;
++    let (request, _) = fixture.vector("valid-simple");
++    assert_eq!(fixture.post(&request).await, StatusCode::OK);
++    // the origin column holds 32 characters at most, so the device is in the recipient
++    let (origin, rcpt): (String, String) = sqlx::query_as(
++        "SELECT r.source, p.rcpt FROM mail_receipts r \
++         JOIN mail_receipt_recipients p ON p.receipt_id = r.id",
++    )
++    .fetch_one(fixture.database.pool())
++    .await
++    .unwrap();
++    assert_eq!(origin, "bridge");
++    assert_eq!(rcpt, format!("bridge:{}", fixture.device));
 +}
 diff --git a/apps/server/tests/openapi_contract.rs b/apps/server/tests/openapi_contract.rs
 index 37ecd93e..5b12a602 100644

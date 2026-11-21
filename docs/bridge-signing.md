@@ -82,7 +82,14 @@ Both past and future are bounded. Server time is unix seconds, UTC.
   forged requests cannot fill the cache.
 - A pair is kept for at least 600 seconds (twice the window), then may be dropped.
 - A nonce seen again for the same device within that time is a replay: 401.
-- The cache is lost on restart. The timestamp window and raw-message dedupe still apply.
+- The cache lives in the server process only. A restart empties it, which reopens the
+  5 minute window: a request captured before the restart can be replayed once until its
+  timestamp falls outside the window. The second layer is the raw-message dedupe of the
+  mail intake: a replayed message that is byte-identical to a stored one is not stored
+  again (the replay answers 200 but changes nothing). Several servers behind one name each
+  have their own cache.
+- A delivery that is not stored (503) forgets its nonce, so the retry with the same nonce
+  is accepted.
 
 ## Verification order
 
@@ -92,21 +99,37 @@ The server stops at the first failure.
 |---|---|---|---|
 | 1 | Feature enabled (registry path configured and instance mail enabled) | feature off | 404 |
 | 2 | `device_id` is in the registry | unknown device | 404 |
-| 3 | Device is not revoked | revoked | 401 |
+| 3 | Device is not revoked | revoked | 401, code `device_revoked` |
 | 4 | Headers present once, timestamp/nonce/signature well formed | malformed | 401 |
-| 5 | Signature verifies over the signed string with the device public key | bad signature | 401 |
-| 6 | Timestamp inside the window | expired or future | 401 |
-| 7 | Nonce not used before for this device | replay | 401 |
-| 8 | Body size within limit | too large | 413 |
-| 9 | Store through the mail intake pipeline | storage, quota, database error | 503 |
+| 5 | A body slot is free within 10 s, then the body arrives within 30 s | no slot / too slow / broken | 503 / 408 / 400 |
+| 6 | Body size within limit | too large | 413 |
+| 7 | Signature verifies over the signed string with the device public key | bad signature | 401 |
+| 8 | Timestamp inside the window | expired or future | 401 |
+| 9 | The device's member is still a full member and its mailbox is active | member removed, mailbox suspended | 401 |
+| 10 | Nonce not used before for this device | replay | 401 |
+| 11 | Store through the mail intake pipeline | storage, quota, database error | 503 |
 | - | Stored (or already stored: duplicate raw message) | success | 200 |
 
 Reasons are not distinguished in the response body for 401, so a caller cannot
-probe which check failed. The server logs the reason without message content.
+probe which check failed. The server logs the reason without message content. The one
+exception is a revoked device: its 401 body is
+`{"error":"device revoked","code":"device_revoked","detail":"..."}`, so the bridge can
+tell the user to enroll again. A device id from the URL is cut and cleaned before it is
+logged.
 
-Retry guidance for the bridge: 200 done. 503 retry later with backoff. 401, 413
-and 404 are permanent for that message (404 and 401 may also mean the device must
+Retry guidance for the bridge: 200 done. 503 and 408 retry later with backoff. 401, 413,
+400 and 404 are permanent for that message (404 and 401 may also mean the device must
 be re-enrolled); skip and log, do not retry forever.
+
+## Authentication results
+
+A bridge delivery is not checked for SPF, DKIM or DMARC: the signature proves which
+device sent the request, not who wrote the message. Orbit stores the message with a
+neutral verdict (`none` for all three) and adds no `Authentication-Results` header of its
+own. The `Authentication-Results`, `Received-SPF` and other headers that Outlook kept
+in the message's transport headers are preserved verbatim in the stored raw message. They
+are the original receiving server's claims, not Orbit's verdict, and Orbit does not
+evaluate them.
 
 ## Body size limit
 

@@ -232,9 +232,27 @@ Test-Case 'html only item with no transport headers gets From, Date, Message-ID 
     Assert-Equal (Get-Hdr $m 'date') 'Wed, 04 Mar 2026 05:07:07 +0000'.Replace('05:07:07', '05:06:07') 'date from received time'
 }
 
+Test-Case 'non-ASCII and folded transport headers stay valid: encoded word only in the value, continuation kept' {
+    $u = [char]0x00FC; $o = [char]0x00F6
+    $hdr = "Subject: Gr${u}sse aus`r`n K${o}ln und mehr`r`nX-Note: caf${u}`r`nFrom: Alice <alice@example.com>`r`nMessage-ID: <h1@example.com>`r`nDate: Wed, 04 Mar 2026 05:06:00 +0000`r`n"
+    $bytes = ConvertTo-MimeMessage -Item (New-FakeItem @{ TransportHeaders = $hdr; EntryId = 'H1' })
+    $text = [Text.Encoding]::ASCII.GetString($bytes)
+    $head = $text.Substring(0, $text.IndexOf("`r`n`r`n"))
+    $lines = $head -split "`r`n"
+    foreach ($l in $lines) {
+        Assert-True ($l -cmatch '^[ \t]' -or $l -cmatch '^[!-9;-~]+:( |$)') "header line is 'Name: value' or a continuation: $l"
+    }
+    $subject = [array]::IndexOf($lines, @($lines | Where-Object { $_ -like 'Subject: =?UTF-8?B?*' })[0])
+    Assert-True ($subject -ge 0) 'Subject keeps its name, value is an encoded word'
+    Assert-True ($lines[$subject + 1] -cmatch '^[ \t]') 'the continuation line is still a continuation'
+    Assert-True ((@($lines | Where-Object { $_ -like 'X-Note: =?UTF-8?B?*?=' })).Count -eq 1) 'X-Note value encoded'
+    $m = Split-Mime $bytes
+    Assert-Equal (@($m.Headers | Where-Object { $_.Name -ieq 'subject' }).Count) 1 'one subject'
+}
+
 # ---- delivery
 
-$config = [pscustomobject]@{ server = 'https://orbit.example.com/'; workspace_id = 'ws1'; device_id = $doc.device_id; address = 'x@y.bridge.invalid'
+$config =[pscustomobject]@{ server = 'https://orbit.example.com/'; workspace_id = 'ws1'; device_id = $doc.device_id; address = 'x@y.bridge.invalid'
     device_name = 'T'; key_name = 'k'; key_provider = 'p'; enrolled_at = 'now' }
 
 Test-Case 'fake Inbox items are delivered as signed, parseable messages' {
@@ -334,6 +352,31 @@ Test-Case 'failed enroll leaves no key and no config, with a plain message' {
         Assert-True ($msg -like '*did not accept the credential*') "message: $msg"
         Assert-True (-not (Read-BridgeConfig)) 'no config'
     } finally { Remove-Item -Recurse -Force $env:WORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:WORBIT_BRIDGE_HOME }
+}
+
+Test-Case 'enroll -Force forgets items skipped for auth failures (401/404) so they are retried, and keeps the other records' {
+    $env:WORBIT_BRIDGE_HOME = Join-Path ([IO.Path]::GetTempPath()) ('worbit-bridge-enroll-' + [guid]::NewGuid())
+    $cfg = $null
+    try {
+        Write-BridgeConfig ([pscustomobject]@{ server = 'https://orbit.example.com'; device_id = 'old'; key_name = 'k'; key_provider = 'p'; enrolled_at = '2026-01-01T00:00:00.0000000Z' })
+        $at = '2026-03-05T00:00:00.0000000Z'
+        Write-BridgeState @{ version = 1; cursor = '2026-03-04T12:00:00.0000000Z'; pending = @(); items = @{
+            A = @{ outcome = 'skipped'; status = 401; at = $at; received = '2026-03-01T10:00:00.0000000Z' }
+            B = @{ outcome = 'skipped'; status = 404; at = $at; received = '2026-03-02T10:00:00.0000000Z' }
+            C = @{ outcome = 'skipped'; status = 413; at = $at; received = '2026-03-03T10:00:00.0000000Z' }
+            D = @{ outcome = 'delivered'; status = 200; at = $at } } }
+        Set-BridgeHttpTransport { param($r) @{ Status = 201; Body = '{"id":"11111111-2222-4333-8444-555555555555","name":"PC","address":"u@ws.bridge.invalid"}' } }
+        $cfg = Invoke-BridgeEnroll -Server 'https://orbit.example.com' -WorkspaceId 'ws-1' -Credential 'T' -Name 'PC' -Provider 'Microsoft Software Key Storage Provider' -Force
+        $state = Read-BridgeState
+        $names = @($state.items.PSObject.Properties.Name) | Sort-Object
+        Assert-Equal ($names -join ',') 'C,D' 'only the 401/404 skips are forgotten'
+        # the run loop starts again from the oldest forgotten item
+        $cursor = [DateTime]::Parse([string]$state.cursor, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        Assert-True ($cursor -le [DateTime]::SpecifyKind([DateTime]'2026-03-01T10:00:00', 'Utc')) 'cursor moved back to the oldest forgotten item'
+    } finally {
+        if ($cfg) { Remove-BridgeKey $cfg.key_name $cfg.key_provider }
+        Remove-Item -Recurse -Force $env:WORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue; Remove-Item Env:WORBIT_BRIDGE_HOME
+    }
 }
 
 Test-Case 'plain http to a remote host is refused' {
@@ -471,6 +514,65 @@ Test-Case 'a message over 2 MiB is recorded as skipped (413) without a request' 
         Assert-Equal $r.Skipped 1 'skipped'
         Assert-Equal $script:seen.Count 0 'no request'
         Assert-Equal (Read-BridgeState).items.BIG.status 413 'recorded 413'
+    } finally { Remove-RunHome $h }
+}
+
+function New-LazyItem($Overrides, [scriptblock]$Load) {
+    $i = New-FakeItem $Overrides | Select-Object -Property * -ExcludeProperty Attachments
+    $i | Add-Member -NotePropertyName LoadAttachments -NotePropertyValue $Load
+    return $i
+}
+
+Test-Case 'attachments load per item, only when it is delivered; an item over 2 MiB is skipped without loading them' {
+    $h = New-RunHome
+    try {
+        $loadedList = New-Object Collections.ArrayList
+        $script:seen = @()
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; @{ Status = 200; Body = '' } }
+        $att = [pscustomobject]@{ FileName = 'a.bin'; MimeType = 'application/octet-stream'; ContentId = ''; IsInline = $false; Bytes = [byte[]](1, 2, 3) }
+        $loadFor = { param($id, $list, $att) $s = { [void]$list.Add($id); $att }.GetNewClosure(); $s }
+        $a = New-LazyItem @{ EntryId = 'A'; Size = 1000; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') } (& $loadFor 'A' $loadedList $att)
+        $adapter = New-FakeAdapter @($a)
+        [void](Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep)
+        Assert-Equal ($loadedList -join ',') 'A' 'A loaded when delivered'
+        $loadedList.Clear(); $script:seen = @()
+        $b = New-LazyItem @{ EntryId = 'B'; Size = 3MB; ReceivedTime = (Get-RecvTime '2026-03-01T11:00:00') } (& $loadFor 'B' $loadedList $att)
+        $c = New-LazyItem @{ EntryId = 'C'; Size = 2000; ReceivedTime = (Get-RecvTime '2026-03-01T12:00:00') } (& $loadFor 'C' $loadedList $att)
+        $adapter.Items = @($a, $b, $c)
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal ($loadedList -join ',') 'C' 'delivered A and too large B never load attachments; only C does'
+        Assert-Equal $r.Delivered 1 'C delivered'
+        Assert-Equal $r.Skipped 1 'B skipped'
+        Assert-Equal $script:seen.Count 1 'one request'
+        $state = Read-BridgeState
+        Assert-Equal $state.items.B.outcome 'skipped' 'B recorded as skipped'
+        Assert-Equal $state.items.B.status 413 'B too large'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'items behind a halted item are not loaded' {
+    $h = New-RunHome
+    try {
+        $loadedList = New-Object Collections.ArrayList
+        Set-BridgeHttpTransport { param($r) @{ Status = 503; Body = '' } }
+        $loadFor = { param($id, $list) $s = { [void]$list.Add($id) }.GetNewClosure(); $s }
+        $adapter = New-FakeAdapter @(
+            (New-LazyItem @{ EntryId = 'A'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') } (& $loadFor 'A' $loadedList)),
+            (New-LazyItem @{ EntryId = 'B'; ReceivedTime = (Get-RecvTime '2026-03-01T11:00:00') } (& $loadFor 'B' $loadedList)))
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Pending 2 'both pending'
+        Assert-True (-not ($loadedList -contains 'B')) 'B never loaded'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'state and config files are replaced in place without leaving a temporary file' {
+    $h = New-RunHome
+    try {
+        Write-BridgeState @{ version = 1; n = 1 }
+        Write-BridgeState @{ version = 1; n = 2 }
+        Assert-Equal (Read-BridgeState).n 2 'second write wins'
+        Assert-Equal @(Get-ChildItem -LiteralPath $h -Filter '*.tmp').Count 0 'no temporary file left'
+        Assert-Equal (Read-BridgeConfig).device_id $runConfig.device_id 'config untouched'
     } finally { Remove-RunHome $h }
 }
 

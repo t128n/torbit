@@ -39,12 +39,17 @@ foreach ($file in @("install.ps1", "uninstall.ps1", "torbit.env.example", "READM
     Copy-Item (Join-Path $windows $file) (Join-Path $stage $file)
 }
 
-# The Outlook bridge ships as scripts next to install.ps1 (bridge/bridge.ps1 and its module).
+# The Outlook bridge ships as one Go binary (scripts/build-bridge.ps1), also as a standalone release asset
+# that `torbit-bridge upgrade` downloads.
+$bridgeExe = Join-Path $script:TorbitRoot "bridge/dist/torbit-bridge.exe"
+if (-not (Test-Path $bridgeExe)) {
+    throw "missing $bridgeExe; run scripts/build-bridge.ps1 first"
+}
 $bridgeStage = Join-Path $stage "bridge"
 New-Item -ItemType Directory -Force $bridgeStage | Out-Null
-foreach ($file in @("bridge.ps1", "TorbitBridge.psm1")) {
-    Copy-Item (Join-Path (Join-Path $windows "bridge") $file) (Join-Path $bridgeStage $file)
-}
+Copy-Item $bridgeExe (Join-Path $bridgeStage "torbit-bridge.exe")
+$bridgeAsset = "torbit-bridge-windows-x86_64-$Version.exe"
+Copy-Item $bridgeExe (Join-Path $OutputDir $bridgeAsset) -Force
 
 foreach ($file in @("LICENSE", "NOTICE", "VERSION")) {
     Copy-Item (Join-Path $script:TorbitRoot $file) (Join-Path $stage $file)
@@ -60,8 +65,9 @@ Write-Step "Creating $zip"
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal
 
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$bridgeHash = (Get-FileHash (Join-Path $OutputDir $bridgeAsset) -Algorithm SHA256).Hash.ToLowerInvariant()
 $checksums = Join-Path $OutputDir "SHA256SUMS"
-Set-Content -Path $checksums -Value "$hash  $name.zip" -Encoding ascii
+Set-Content -Path $checksums -Value @("$hash  $name.zip", "$bridgeHash  $bridgeAsset") -Encoding ascii
 
 Write-Host "Packaged $zip"
 Write-Host "SHA256 $hash"

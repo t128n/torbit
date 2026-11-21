@@ -97,9 +97,11 @@ Stop-Service Orbit
 See [docs/deploy-windows.md](docs/deploy-windows.md) for the reverse proxy,
 ACLs, upgrade, and rollback procedure.
 
-The zip also contains the optional Outlook bridge (`bridge/`), which delivers
-mail from classic Outlook on a user's PC to Orbit. It is off until
-`ORBIT_MAIL_BRIDGE_REGISTRY_PATH` is set. See [docs/bridge.md](docs/bridge.md).
+The zip also contains the optional Outlook bridge (`bridge/torbit-bridge.exe`, a
+Go program with `setup`, `doctor`, `install`, `uninstall`, `upgrade` and more),
+which delivers mail from classic Outlook on a user's PC to Orbit as a native
+Windows service. It is off until `ORBIT_MAIL_BRIDGE_REGISTRY_PATH` is set. See
+[docs/bridge.md](docs/bridge.md).
 
 ## Releases
 

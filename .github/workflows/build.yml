@@ -14,6 +14,25 @@ permissions:
   contents: read
 
 jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Cross-vet the Windows code
+        run: |
+          GOOS=windows GOARCH=amd64 go vet ./...
+          GOOS=windows GOARCH=arm64 go vet ./...
+
   windows:
     runs-on: windows-latest
     steps:
@@ -68,9 +87,28 @@ jobs:
         shell: pwsh
         run: ./tests/smoke.ps1
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+
+      - name: Build and test the Outlook bridge
+        shell: pwsh
+        run: |
+          Push-Location bridge
+          try { go test ./...; if ($LASTEXITCODE -ne 0) { throw "go test failed" } } finally { Pop-Location }
+          ./scripts/build-bridge.ps1
+          & ./bridge/dist/torbit-bridge.exe version
+          & ./bridge/dist/torbit-bridge.exe help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "torbit-bridge help failed" }
+
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1
+
+      - name: Packaging tests
+        shell: pwsh
+        run: ./tests/packaging.tests.ps1
 
       # Run this step with Windows PowerShell 5.1, the shell on a stock Windows
       # Server, so install.ps1 stays compatible there. The installer creates the
@@ -144,5 +182,6 @@ jobs:
           name: torbit-windows
           path: |
             artifacts/*.zip
+            artifacts/*.exe
             artifacts/SHA256SUMS
           if-no-files-found: error

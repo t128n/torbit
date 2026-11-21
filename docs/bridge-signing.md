@@ -1,16 +1,16 @@
-# Bridge signing format (worbit-bridge-v1)
+# Bridge signing format (torbit-bridge-v1)
 
-This is the contract between the Outlook bridge script and the Orbit server patch.
+This is the contract between the Outlook bridge (`bridge/`, Go) and the Orbit server patch.
 Both sides must pass `tests/bridge-vectors.json`. The script side is checked by
-`tests/verify-bridge-vectors.ps1` (Windows PowerShell 5.1, .NET `ECDsa`/CNG).
+`bridge/internal/core` (`go test ./...`, Go `crypto/ecdsa`).
 
 ## Request
 
 ```
 POST /api/v1/mail/inbound/bridge/{device_id}
-X-Worbit-Timestamp: <unix seconds>
-X-Worbit-Nonce: <nonce>
-X-Worbit-Signature: <base64 signature>
+X-Torbit-Timestamp: <unix seconds>
+X-Torbit-Nonce: <nonce>
+X-Torbit-Signature: <base64 signature>
 
 <raw MIME message bytes>
 ```
@@ -38,7 +38,7 @@ Five lines joined with a single LF (`0x0A`). There is no trailing newline and no
 The string is encoded as UTF-8 (it is pure ASCII).
 
 ```
-worbit-bridge-v1\n
+torbit-bridge-v1\n
 <timestamp>\n
 <nonce>\n
 <device_id>\n
@@ -48,7 +48,7 @@ worbit-bridge-v1\n
 Example (no spaces, `\n` is a real LF):
 
 ```
-worbit-bridge-v1
+torbit-bridge-v1
 1790000000
 AAECAwQFBgcICQoLDA0ODw
 7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d
@@ -61,10 +61,10 @@ in the header and path (same characters, no normalisation).
 ## Signature
 
 - Key: ECDSA on NIST P-256 (`secp256r1`, `nistP256`).
-- Digest: SHA-256 over the UTF-8 signed string (ECDSA hashes it internally; in .NET
-  call `SignData(bytes, SHA256)`).
+- Digest: SHA-256 over the UTF-8 signed string (the bridge hashes it and signs the
+  32-byte digest with CNG `NCryptSignHash`).
 - Format: IEEE-P1363, `r || s`, each 32 bytes big-endian, so exactly 64 bytes.
-  This is the native .NET output. It is not ASN.1 DER. A DER signature is rejected.
+  This is the native CNG output. It is not ASN.1 DER. A DER signature is rejected.
 - Header value: standard base64 (RFC 4648 section 4) with padding. A 64-byte value
   encodes to 88 characters.
 - Public key in the registry and in enrollment: SubjectPublicKeyInfo (SPKI) DER,
@@ -162,4 +162,4 @@ replayed nonce, oversized body, feature off, 503) are listed in
 
 To regenerate: `node tests/generate-bridge-vectors.mjs > tests/bridge-vectors.json`
 (this creates a new key and new signatures). To verify:
-`powershell -NoProfile -ExecutionPolicy Bypass -File tests/verify-bridge-vectors.ps1`.
+`cd bridge && go test ./internal/core -run TestSigningVectors`.

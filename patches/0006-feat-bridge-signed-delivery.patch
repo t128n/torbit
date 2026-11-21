@@ -1,0 +1,1153 @@
+From 05cceac204c305c931a68604190c3744f0617577 Mon Sep 17 00:00:00 2001
+From: Torben Haack <t128n@ipv4.8shield.net>
+Date: Sat, 21 Nov 2026 17:30:58 +0100
+Subject: [PATCH] feat(mail): add signed Worbit bridge delivery endpoint
+
+---
+ apps/server/src/mail_bridge.rs            | 160 ++++++
+ apps/server/src/mail_intake.rs            |   3 +
+ apps/server/src/mail_routes/bridge.rs     | 172 +++++-
+ apps/server/src/mail_routes/mod.rs        |  27 +
+ apps/server/src/openapi.rs                |   1 +
+ apps/server/tests/mail_bridge_delivery.rs | 631 ++++++++++++++++++++++
+ apps/server/tests/openapi_contract.rs     |   4 +-
+ 7 files changed, 995 insertions(+), 3 deletions(-)
+ create mode 100644 apps/server/tests/mail_bridge_delivery.rs
+
+diff --git a/apps/server/src/mail_bridge.rs b/apps/server/src/mail_bridge.rs
+index 07df6432..931bb507 100644
+--- a/apps/server/src/mail_bridge.rs
++++ b/apps/server/src/mail_bridge.rs
+@@ -379,3 +379,163 @@ fn parse(value: &str) -> Result<Id, sqlx::Error> {
+         .parse()
+         .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+ }
++
++// Signed delivery (`docs/bridge-signing.md` of the Worbit repository, format `worbit-bridge-v1`).
++
++/// The first line of the signed string.
++pub const SIGNING_FORMAT: &str = "worbit-bridge-v1";
++/// A timestamp is accepted when it is at most this many seconds from the server's clock.
++pub const WINDOW_SECS: i64 = 300;
++/// A `(device, nonce)` pair is remembered this long (twice the window).
++pub const NONCE_MEMORY_SECS: i64 = 600;
++/// The largest message a bridge delivery may carry. It is the platform's cap on non-multipart
++/// bodies, so the handler and the platform layer agree.
++pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
++/// Request bodies read at once.
++const BODIES_AT_ONCE: usize = 4;
++
++/// Why a delivery was refused. Logged by the handler; the response never tells which.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum Refusal {
++    Malformed,
++    BadSignature,
++    Expired,
++    Replay,
++}
++
++/// The values of the three request headers, as sent.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct SignedHeaders {
++    pub timestamp: i64,
++    /// The header text (it is part of the signed string).
++    pub timestamp_text: String,
++    pub nonce: String,
++    pub signature: [u8; 64],
++}
++
++impl SignedHeaders {
++    /// Parses the header values: digits only without leading zeros, a nonce of 8 to 64 characters
++    /// from `A-Za-z0-9-_`, and a standard base64 signature of 64 bytes.
++    pub fn parse(timestamp: &str, nonce: &str, signature: &str) -> Result<Self, Refusal> {
++        let digits = !timestamp.is_empty()
++            && timestamp.len() <= 12
++            && timestamp.bytes().all(|byte| byte.is_ascii_digit())
++            && !timestamp.starts_with('0');
++        let nonce_ok = (8..=64).contains(&nonce.len())
++            && nonce
++                .bytes()
++                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
++        if !digits || !nonce_ok {
++            return Err(Refusal::Malformed);
++        }
++        let bytes = STANDARD.decode(signature).map_err(|_| Refusal::Malformed)?;
++        let signature: [u8; 64] = bytes.try_into().map_err(|_| Refusal::Malformed)?;
++        Ok(Self {
++            timestamp: timestamp.parse().map_err(|_| Refusal::Malformed)?,
++            timestamp_text: timestamp.to_owned(),
++            nonce: nonce.to_owned(),
++            signature,
++        })
++    }
++}
++
++/// The string a device signs: five lines joined by LF.
++#[must_use]
++pub fn signed_string(timestamp: &str, nonce: &str, device_id: &str, body: &[u8]) -> String {
++    use sha2::{Digest as _, Sha256};
++    format!(
++        "{SIGNING_FORMAT}\n{timestamp}\n{nonce}\n{device_id}\n{:x}",
++        Sha256::digest(body)
++    )
++}
++
++/// Whether `signature` (IEEE P1363, `r || s`) is the device key's ECDSA signature over `signed`.
++#[must_use]
++pub fn signature_valid(public_key: &str, signed: &str, signature: &[u8; 64]) -> bool {
++    use p256::ecdsa::signature::Verifier as _;
++    use p256::ecdsa::{Signature, VerifyingKey};
++    use p256::pkcs8::DecodePublicKey as _;
++
++    let Ok(der) = STANDARD.decode(public_key) else {
++        return false;
++    };
++    let Ok(key) = VerifyingKey::from_public_key_der(&der) else {
++        return false;
++    };
++    let Ok(signature) = Signature::from_slice(signature) else {
++        return false;
++    };
++    key.verify(signed.as_bytes(), &signature).is_ok()
++}
++
++/// What a bridge delivery needs besides the registry: its own intake (never the providers'), the
++/// nonce memory and the clock.
++pub struct BridgeDelivery {
++    intake: crate::mail_intake::MailIntake,
++    nonces: std::sync::Mutex<std::collections::HashMap<(String, String), i64>>,
++    bodies: tokio::sync::Semaphore,
++    /// Tests only: a fixed clock, unix seconds.
++    fixed_now: Option<i64>,
++}
++
++impl BridgeDelivery {
++    #[must_use]
++    pub fn new(mail: std::sync::Arc<crate::repositories::mail::MailRepository>) -> Self {
++        Self {
++            intake: crate::mail_intake::MailIntake::new(
++                mail,
++                MAX_MESSAGE_BYTES as u64 + crate::mail_listener::TRACE_HEADROOM,
++            ),
++            nonces: std::sync::Mutex::new(std::collections::HashMap::new()),
++            bodies: tokio::sync::Semaphore::new(BODIES_AT_ONCE),
++            fixed_now: None,
++        }
++    }
++
++    /// Tests only: the server's clock reads `now` (unix seconds).
++    #[doc(hidden)]
++    #[must_use]
++    pub fn with_fixed_now(mut self, now: i64) -> Self {
++        self.fixed_now = Some(now);
++        self
++    }
++
++    #[must_use]
++    pub fn now_secs(&self) -> i64 {
++        self.fixed_now
++            .unwrap_or_else(|| TimestampMillis::now().as_millis() / 1000)
++    }
++
++    pub async fn body_permit(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
++        self.bodies.acquire().await.ok()
++    }
++
++    #[must_use]
++    pub const fn intake(&self) -> &crate::mail_intake::MailIntake {
++        &self.intake
++    }
++
++    /// Remembers `(device, nonce)`; `false` when it was seen in the last [`NONCE_MEMORY_SECS`].
++    pub fn remember_nonce(&self, device_id: &str, nonce: &str, now: i64) -> bool {
++        let mut nonces = self
++            .nonces
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        nonces.retain(|_, seen| now - *seen <= NONCE_MEMORY_SECS);
++        match nonces.entry((device_id.to_owned(), nonce.to_owned())) {
++            std::collections::hash_map::Entry::Occupied(_) => false,
++            std::collections::hash_map::Entry::Vacant(slot) => {
++                slot.insert(now);
++                true
++            }
++        }
++    }
++
++    /// Forgets a nonce whose message was not stored, so the bridge can send it again.
++    pub fn forget_nonce(&self, device_id: &str, nonce: &str) {
++        self.nonces
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .remove(&(device_id.to_owned(), nonce.to_owned()));
++    }
++}
+diff --git a/apps/server/src/mail_intake.rs b/apps/server/src/mail_intake.rs
+index 64c4d630..3afef63b 100644
+--- a/apps/server/src/mail_intake.rs
++++ b/apps/server/src/mail_intake.rs
+@@ -31,6 +31,8 @@ pub type ReceiptId = Id;
+ pub enum Source {
+     Smtp,
+     Provider(ProviderKind),
++    /// A Worbit bridge device (signed HTTPS delivery).
++    Bridge,
+ }
+ 
+ impl Source {
+@@ -39,6 +41,7 @@ impl Source {
+         match self {
+             Self::Smtp => "smtp",
+             Self::Provider(kind) => kind.as_str(),
++            Self::Bridge => "bridge",
+         }
+     }
+ }
+diff --git a/apps/server/src/mail_routes/bridge.rs b/apps/server/src/mail_routes/bridge.rs
+index 37711961..07aeb897 100644
+--- a/apps/server/src/mail_routes/bridge.rs
++++ b/apps/server/src/mail_routes/bridge.rs
+@@ -5,8 +5,10 @@
+ use std::sync::Arc;
+ 
+ use axum::Json;
++use axum::body::Body;
+ use axum::extract::{Path, State};
+ use axum::http::{HeaderMap, StatusCode, Uri};
++use axum::response::{IntoResponse, Response};
+ use orbit_domain::Permission;
+ use orbit_platform::{Id, TimestampMillis};
+ use serde::{Deserialize, Serialize};
+@@ -14,12 +16,16 @@ use utoipa::ToSchema;
+ 
+ use super::{MailState, RequestIdExtension, problem};
+ use crate::mail_bridge::{
+-    BridgeMailboxError, BridgeRegistry, DeviceRecord, ensure_bridge_mailbox, normalize_public_key,
++    BridgeMailboxError, BridgeRegistry, DeviceRecord, MAX_MESSAGE_BYTES, Refusal, SignedHeaders,
++    WINDOW_SECS, ensure_bridge_mailbox, normalize_public_key, signature_valid, signed_string,
+ };
++use crate::mail_intake::{InboundMessage, IntakeError, Recipient, Source};
+ use crate::repositories::instance_settings::InstanceSettingsRepository;
+ use crate::repositories::mail::MailError;
+ use crate::repositories::membership;
+ use crate::task_routes::{ApiError, ApiJson, authenticate_session};
++use orbit_mail::{AuthOutcome, DmarcVerdict, Verdict};
++use std::net::{IpAddr, Ipv4Addr};
+ 
+ /// An enrolled device. The public key stays in the registry.
+ #[derive(Serialize, ToSchema)]
+@@ -212,6 +218,170 @@ pub(crate) async fn list_bridge_devices(
+     Ok(Json(devices))
+ }
+ 
++/// Delivers one message from an enrolled device (`docs/bridge-signing.md`, format
++/// `worbit-bridge-v1`). The body is the raw MIME message. Checks, in order: the bridge is on and
++/// the device exists (404), it is not revoked (401), the headers, the signature, the timestamp
++/// window and the nonce (401), the size (413), then storage (503 to retry, 200 stored). The
++/// message always goes to the device's mailbox; recipients in the message are ignored. A 401 never
++/// says which check failed; the reason is logged, without message content.
++#[utoipa::path(
++    post,
++    path = "/api/v1/mail/inbound/bridge/{device_id}",
++    params(("device_id" = String, Path)),
++    request_body(content = String, content_type = "message/rfc822", description = "The raw message"),
++    responses((status = 200), (status = 401), (status = 404), (status = 413), (status = 503))
++)]
++pub(crate) async fn deliver_bridge_message(
++    State(state): State<MailState>,
++    Path(device_id): Path<String>,
++    headers: HeaderMap,
++    body: Body,
++) -> Response {
++    let (Some(registry), Some(delivery)) = (state.bridge.clone(), state.bridge_delivery.clone())
++    else {
++        return bridge_reply(StatusCode::NOT_FOUND, "not found");
++    };
++    match InstanceSettingsRepository::new(state.identity.database().clone())
++        .mail_enabled()
++        .await
++    {
++        Ok(true) => {}
++        Ok(false) => return bridge_reply(StatusCode::NOT_FOUND, "not found"),
++        Err(error) => {
++            tracing::warn!(%error, "bridge delivery: instance settings");
++            return bridge_reply(StatusCode::SERVICE_UNAVAILABLE, "try again later");
++        }
++    }
++    let device = match registry.lookup(&device_id).await {
++        Ok(Some(device)) => device,
++        Ok(None) => {
++            tracing::warn!(device = %device_id, "bridge delivery refused: unknown device");
++            return bridge_reply(StatusCode::NOT_FOUND, "not found");
++        }
++        Err(error) => {
++            tracing::error!(%error, "bridge delivery: registry");
++            return bridge_reply(StatusCode::SERVICE_UNAVAILABLE, "try again later");
++        }
++    };
++    if device.revoked_at.is_some() {
++        return refuse(&device_id, "revoked");
++    }
++    let signed = match signed_headers(&headers) {
++        Ok(signed) => signed,
++        Err(refusal) => return refuse(&device_id, reason(refusal)),
++    };
++
++    let Some(_permit) = delivery.body_permit().await else {
++        return bridge_reply(StatusCode::SERVICE_UNAVAILABLE, "try again later");
++    };
++    let Ok(raw) = axum::body::to_bytes(body, MAX_MESSAGE_BYTES).await else {
++        // the signature cannot be checked without the whole body
++        tracing::warn!(device = %device_id, "bridge delivery refused: body over the limit");
++        return bridge_reply(StatusCode::PAYLOAD_TOO_LARGE, "message too large");
++    };
++
++    let text = signed_string(&signed.timestamp_text, &signed.nonce, &device_id, &raw);
++    if !signature_valid(&device.public_key, &text, &signed.signature) {
++        return refuse(&device_id, reason(Refusal::BadSignature));
++    }
++    let now = delivery.now_secs();
++    if (now - signed.timestamp).abs() > WINDOW_SECS {
++        return refuse(&device_id, reason(Refusal::Expired));
++    }
++    if !delivery.remember_nonce(&device_id, &signed.nonce, now) {
++        return refuse(&device_id, reason(Refusal::Replay));
++    }
++
++    let received = chrono::Utc::now().to_rfc2822();
++    // The only header Orbit adds: where the message came from. No `Authentication-Results`: no
++    // check of the sender ran, and the device's signature says nothing about the message's From.
++    let trace = format!(
++        "Received: from worbit-bridge (device {device_id}) by Orbit with HTTPS;\r\n\t{received}\r\n"
++    );
++    let mut message = Vec::with_capacity(trace.len() + raw.len());
++    message.extend_from_slice(trace.as_bytes());
++    message.extend_from_slice(&raw);
++    let accepted = delivery
++        .intake()
++        .accept(InboundMessage {
++            source: Source::Bridge,
++            raw: message,
++            trace_len: trace.len(),
++            mail_from: None,
++            recipients: vec![Recipient::Mailbox {
++                workspace_id: device.workspace_id,
++                address_id: device.address_id,
++                rcpt: format!("bridge:{device_id}"),
++            }],
++            peer_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
++            helo: format!("bridge:{device_id}"),
++            tls: None,
++            auth: neutral(),
++        })
++        .await;
++    match accepted {
++        Ok(_) => bridge_reply(StatusCode::OK, "stored"),
++        Err(IntakeError::TooLarge) => {
++            bridge_reply(StatusCode::PAYLOAD_TOO_LARGE, "message too large")
++        }
++        Err(error) => {
++            // not stored: the bridge may send it again with the same nonce
++            delivery.forget_nonce(&device_id, &signed.nonce);
++            tracing::warn!(device = %device_id, %error, "bridge delivery not stored");
++            bridge_reply(StatusCode::SERVICE_UNAVAILABLE, "try again later")
++        }
++    }
++}
++
++/// The three headers, each exactly once.
++fn signed_headers(headers: &HeaderMap) -> Result<SignedHeaders, Refusal> {
++    let one = |name: &str| -> Result<&str, Refusal> {
++        let mut values = headers.get_all(name).iter();
++        match (values.next(), values.next()) {
++            (Some(value), None) => value.to_str().map_err(|_| Refusal::Malformed),
++            _ => Err(Refusal::Malformed),
++        }
++    };
++    SignedHeaders::parse(
++        one("x-worbit-timestamp")?,
++        one("x-worbit-nonce")?,
++        one("x-worbit-signature")?,
++    )
++}
++
++/// No check of the sender ran: not a pass, and not a DMARC failure that would file it as spam.
++fn neutral() -> AuthOutcome {
++    AuthOutcome {
++        spf: Verdict::None,
++        dkim: Verdict::None,
++        dmarc: DmarcVerdict::None,
++        aligned_domain: None,
++        temp_error: false,
++        spf_domain: None,
++        dkim_domain: None,
++        from_domain: None,
++    }
++}
++
++const fn reason(refusal: Refusal) -> &'static str {
++    match refusal {
++        Refusal::Malformed => "malformed headers",
++        Refusal::BadSignature => "bad signature",
++        Refusal::Expired => "timestamp outside the window",
++        Refusal::Replay => "nonce used before",
++    }
++}
++
++/// Logs why (never the message) and answers the same for every reason.
++fn refuse(device_id: &str, reason: &str) -> Response {
++    tracing::warn!(device = %device_id, reason, "bridge delivery refused");
++    bridge_reply(StatusCode::UNAUTHORIZED, "unauthorized")
++}
++
++fn bridge_reply(status: StatusCode, message: &str) -> Response {
++    (status, Json(serde_json::json!({ "error": message }))).into_response()
++}
++
+ /// Revokes a device: the delivery endpoint refuses it from now on. The device's owner and workspace
+ /// owners and admins can revoke it; for anyone else the device does not exist. Revoking a revoked
+ /// device succeeds.
+diff --git a/apps/server/src/mail_routes/mod.rs b/apps/server/src/mail_routes/mod.rs
+index a1f33ee5..eaee5c4b 100644
+--- a/apps/server/src/mail_routes/mod.rs
++++ b/apps/server/src/mail_routes/mod.rs
+@@ -63,6 +63,8 @@ pub struct MailState {
+     pub(crate) inbound: Option<Arc<ProviderIntake>>,
+     /// Worbit bridge devices; `None`: the bridge routes answer 404.
+     pub(crate) bridge: Option<Arc<crate::mail_bridge::BridgeRegistry>>,
++    /// The signed delivery of those devices: own intake, nonce memory.
++    pub(crate) bridge_delivery: Option<Arc<crate::mail_bridge::BridgeDelivery>>,
+ }
+ 
+ impl MailState {
+@@ -86,6 +88,7 @@ impl MailState {
+             dns: Arc::new(HickoryDns::new(None)),
+             inbound: None,
+             bridge: None,
++            bridge_delivery: None,
+         }
+     }
+ 
+@@ -94,6 +97,11 @@ impl MailState {
+         mut self,
+         registry: Option<Arc<crate::mail_bridge::BridgeRegistry>>,
+     ) -> Self {
++        self.bridge_delivery = registry.as_ref().map(|_| {
++            Arc::new(crate::mail_bridge::BridgeDelivery::new(Arc::clone(
++                &self.mail,
++            )))
++        });
+         self.bridge = registry;
+         self
+     }
+@@ -101,10 +109,24 @@ impl MailState {
+     /// Turns on the Worbit bridge device routes (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`).
+     #[must_use]
+     pub fn with_bridge(mut self, registry: Arc<crate::mail_bridge::BridgeRegistry>) -> Self {
++        self.bridge_delivery = Some(Arc::new(crate::mail_bridge::BridgeDelivery::new(
++            Arc::clone(&self.mail),
++        )));
+         self.bridge = Some(registry);
+         self
+     }
+ 
++    /// Tests only: the bridge delivery reads `now` (unix seconds) as the time. Call after
++    /// [`Self::with_bridge`].
++    #[doc(hidden)]
++    #[must_use]
++    pub fn with_bridge_clock(mut self, now: i64) -> Self {
++        self.bridge_delivery = Some(Arc::new(
++            crate::mail_bridge::BridgeDelivery::new(Arc::clone(&self.mail)).with_fixed_now(now),
++        ));
++        self
++    }
++
+     /// Receives mail from providers' webhooks.
+     #[must_use]
+     pub fn with_inbound(mut self, inbound: Arc<ProviderIntake>) -> Self {
+@@ -186,6 +208,11 @@ pub fn mail_router(state: MailState) -> Router {
+             "/api/v1/mail/inbound/{kind}/{provider_id}/mime",
+             post(inbound::post_inbound),
+         )
++        // a literal segment wins over `{kind}`: the bridge is not a provider
++        .route(
++            "/api/v1/mail/inbound/bridge/{device_id}",
++            post(bridge::deliver_bridge_message),
++        )
+         .route(
+             "/api/v1/workspaces/{workspace_id}/mail/bridge/devices",
+             get(bridge::list_bridge_devices).post(bridge::enroll_bridge_device),
+diff --git a/apps/server/src/openapi.rs b/apps/server/src/openapi.rs
+index c3cd2d94..e5d52440 100644
+--- a/apps/server/src/openapi.rs
++++ b/apps/server/src/openapi.rs
+@@ -430,6 +430,7 @@ pub const CONTRACT_ID: &str = "orbit-api-v1";
+         crate::mail_routes::bridge::list_bridge_devices,
+         crate::mail_routes::bridge::enroll_bridge_device,
+         crate::mail_routes::bridge::revoke_bridge_device,
++        crate::mail_routes::bridge::deliver_bridge_message,
+         crate::mail_routes::domains::list_mail_domains,
+         crate::mail_routes::domains::create_mail_domain,
+         crate::mail_routes::domains::get_mail_domain,
+diff --git a/apps/server/tests/mail_bridge_delivery.rs b/apps/server/tests/mail_bridge_delivery.rs
+new file mode 100644
+index 00000000..64da72f3
+--- /dev/null
++++ b/apps/server/tests/mail_bridge_delivery.rs
+@@ -0,0 +1,631 @@
++//! `POST /api/v1/mail/inbound/bridge/{device_id}`: signed delivery from a Worbit bridge device.
++//! The signing cases come from `tests/bridge-vectors.json` of the Worbit repository (the contract
++//! of `docs/bridge-signing.md`); the state-dependent cases (unknown, revoked, replay, size, off)
++//! are tested here directly.
++
++use std::path::PathBuf;
++use std::sync::Arc;
++
++use axum::body::{Body, to_bytes};
++use axum::http::{Request, StatusCode, header};
++use base64::Engine as _;
++use base64::engine::general_purpose::STANDARD;
++use orbit_platform::{
++    AttachmentMutationCoordinator, Id, LocalBlobStore, MailMode, TestDatabase, TimestampMillis,
++    UploadLimits, UploadService,
++};
++use orbit_server::auth_routes::CookieMode;
++use orbit_server::mail_bridge::{BridgeRegistry, DeviceRecord, ensure_bridge_mailbox};
++use orbit_server::mail_routes::{MailSettings, MailState, mail_router};
++use orbit_server::repositories::identity::{IdentityRepository, SetupRequest};
++use orbit_server::repositories::instance_settings::InstanceSettingsRepository;
++use orbit_server::repositories::mail::MailRepository;
++use p256::ecdsa::signature::Signer as _;
++use p256::ecdsa::{Signature, SigningKey};
++use p256::pkcs8::DecodePrivateKey as _;
++use serde_json::Value;
++use sha2::{Digest, Sha256};
++use tower::ServiceExt;
++
++const APP_KEY: [u8; 32] = [8; 32];
++const VECTORS: &str = include_str!("../../../../../tests/bridge-vectors.json");
++/// The second device of the vectors' "wrong device id" case.
++const OTHER_DEVICE: &str = "0f9e8d7c-6b5a-4c3d-9e2f-1a0b9c8d7e6f";
++
++struct Vectors(Value);
++
++impl Vectors {
++    fn load() -> Self {
++        Self(serde_json::from_str(VECTORS).unwrap())
++    }
++    fn text(&self, key: &str) -> String {
++        self.0[key].as_str().unwrap().to_owned()
++    }
++    fn now(&self) -> i64 {
++        self.0["now_unix"].as_i64().unwrap()
++    }
++    fn signing_key(&self) -> SigningKey {
++        let der = STANDARD
++            .decode(self.text("private_key_pkcs8_base64"))
++            .unwrap();
++        SigningKey::from_pkcs8_der(&der).unwrap()
++    }
++}
++
++struct Request2 {
++    path: String,
++    headers: Vec<(String, String)>,
++    body: Vec<u8>,
++}
++
++struct Fixture {
++    _root: tempfile::TempDir,
++    database: TestDatabase,
++    registry: Arc<BridgeRegistry>,
++    app: axum::Router,
++    vectors: Vectors,
++    workspace: Id,
++    owner_cookie: String,
++    owner_mailbox: Id,
++    other_mailbox: Id,
++    device: String,
++}
++
++impl Fixture {
++    async fn new() -> Self {
++        Self::with(true, true).await
++    }
++
++    async fn with(registry_on: bool, mail_on: bool) -> Self {
++        let vectors = Vectors::load();
++        let database = TestDatabase::new().await.unwrap();
++        let identity = Arc::new(IdentityRepository::new((*database).clone()));
++        let now = TimestampMillis::now();
++        identity
++            .store_setup_token(
++                "operator-secret",
++                TimestampMillis::from_millis(now.as_millis() + 60_000),
++            )
++            .await
++            .unwrap();
++        let setup = identity
++            .complete_setup(
++                SetupRequest {
++                    token: "operator-secret".to_owned(),
++                    email: "owner@example.com".to_owned(),
++                    display_name: "Owner".to_owned(),
++                    password_hash: "unused".to_owned(),
++                    workspace_name: "Orbit".to_owned(),
++                    project_name: "General".to_owned(),
++                },
++                now,
++            )
++            .await
++            .unwrap();
++        InstanceSettingsRepository::new((*database).clone())
++            .set_mail_enabled(setup.user_id, mail_on, "request", now)
++            .await
++            .unwrap();
++        let root = tempfile::tempdir().unwrap();
++        let uploads = UploadService::new(
++            (*database).clone(),
++            Arc::new(LocalBlobStore::new(root.path().join("attachments"))),
++            AttachmentMutationCoordinator::default(),
++            UploadLimits::default(),
++        );
++        let mail = Arc::new(MailRepository::new((*database).clone(), uploads, APP_KEY));
++        let registry = Arc::new(BridgeRegistry::new(
++            PathBuf::from(root.path()).join("devices.json"),
++        ));
++        let mut state = MailState::new(
++            Arc::clone(&identity),
++            Arc::clone(&mail),
++            CookieMode::secure(),
++            MailSettings {
++                enabled: false,
++                hostname: None,
++                mode: MailMode::Relay,
++            },
++        );
++        if registry_on {
++            state = state
++                .with_bridge(Arc::clone(&registry))
++                .with_bridge_clock(vectors.now());
++        }
++
++        // a second member with a device of their own (the same throwaway key)
++        let member = Id::new_v7();
++        let email = format!("{member}@example.com");
++        sqlx::query(
++            "INSERT INTO users (id, email, normalized_email, display_name, password_hash, created_at, updated_at) \
++             VALUES ($1, $2, $3, 'Member', 'unused', $4, $4)",
++        )
++        .bind(member.to_string())
++        .bind(&email)
++        .bind(&email)
++        .bind(now.as_millis())
++        .execute(database.pool())
++        .await
++        .unwrap();
++        sqlx::query(
++            "INSERT INTO memberships (id, workspace_id, user_id, role, version, created_at, updated_at) \
++             VALUES ($1, $2, $3, 'member', 0, $4, $4)",
++        )
++        .bind(Id::new_v7().to_string())
++        .bind(setup.workspace_id.to_string())
++        .bind(member.to_string())
++        .bind(now.as_millis())
++        .execute(database.pool())
++        .await
++        .unwrap();
++
++        let device = vectors.text("device_id");
++        let mut mailboxes = Vec::new();
++        for (user, device_id) in [(setup.user_id, device.as_str()), (member, OTHER_DEVICE)] {
++            let mailbox = ensure_bridge_mailbox(&database, setup.workspace_id, user)
++                .await
++                .unwrap();
++            registry
++                .add(DeviceRecord {
++                    device_id: device_id.to_owned(),
++                    workspace_id: setup.workspace_id,
++                    user_id: user,
++                    membership_id: mailbox.membership_id,
++                    mailbox_id: mailbox.mailbox_id,
++                    address_id: mailbox.address_id,
++                    name: "Test".to_owned(),
++                    public_key: vectors.text("public_key_spki_base64"),
++                    created_at: now.as_millis(),
++                    revoked_at: None,
++                })
++                .await
++                .unwrap();
++            mailboxes.push(mailbox.mailbox_id);
++        }
++        Self {
++            _root: root,
++            database,
++            registry,
++            app: mail_router(state),
++            workspace: setup.workspace_id,
++            owner_cookie: format!("__Host-orbit_session={}", setup.session.token),
++            owner_mailbox: mailboxes[0],
++            other_mailbox: mailboxes[1],
++            device,
++            vectors,
++        }
++    }
++
++    async fn post(&self, request: &Request2) -> StatusCode {
++        let mut builder = Request::builder().method("POST").uri(&request.path);
++        for (name, value) in &request.headers {
++            builder = builder.header(name, value);
++        }
++        let response = self
++            .app
++            .clone()
++            .oneshot(builder.body(Body::from(request.body.clone())).unwrap())
++            .await
++            .unwrap();
++        let status = response.status();
++        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        // the same neutral body for every 401, and never message content
++        if status == StatusCode::UNAUTHORIZED {
++            assert_eq!(
++                String::from_utf8_lossy(&bytes),
++                r#"{"error":"unauthorized"}"#
++            );
++        }
++        status
++    }
++
++    /// The vector `name` as a request.
++    fn vector(&self, name: &str) -> (Request2, Value) {
++        let vector = self.vectors.0["vectors"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|vector| vector["name"] == name)
++            .unwrap_or_else(|| panic!("no vector {name}"));
++        let headers = vector["headers"]
++            .as_object()
++            .unwrap()
++            .iter()
++            .map(|(name, value)| (name.clone(), value.as_str().unwrap().to_owned()))
++            .collect();
++        (
++            Request2 {
++                path: vector["path"].as_str().unwrap().to_owned(),
++                headers,
++                body: STANDARD
++                    .decode(vector["body_base64"].as_str().unwrap())
++                    .unwrap(),
++            },
++            vector["expect"].clone(),
++        )
++    }
++
++    /// A request for `device` signed with the vectors' key at `timestamp`.
++    fn signed(&self, device: &str, timestamp: i64, nonce: &str, body: &[u8]) -> Request2 {
++        let signed = format!(
++            "worbit-bridge-v1\n{timestamp}\n{nonce}\n{device}\n{:x}",
++            Sha256::digest(body)
++        );
++        let signature: Signature = self.vectors.signing_key().sign(signed.as_bytes());
++        Request2 {
++            path: format!("/api/v1/mail/inbound/bridge/{device}"),
++            headers: vec![
++                ("X-Worbit-Timestamp".to_owned(), timestamp.to_string()),
++                ("X-Worbit-Nonce".to_owned(), nonce.to_owned()),
++                (
++                    "X-Worbit-Signature".to_owned(),
++                    STANDARD.encode(signature.to_bytes()),
++                ),
++            ],
++            body: body.to_vec(),
++        }
++    }
++
++    fn now_signed(&self, nonce: &str, body: &[u8]) -> Request2 {
++        self.signed(&self.device, self.vectors.now(), nonce, body)
++    }
++
++    async fn count(&self, sql: &str) -> i64 {
++        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
++            .fetch_one(self.database.pool())
++            .await
++            .unwrap()
++    }
++
++    async fn receipts(&self) -> i64 {
++        self.count("SELECT COUNT(*) FROM mail_receipts").await
++    }
++
++    /// Runs the ingest of every pending receipt, as the job queue does.
++    async fn ingest_all(&self) {
++        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM mail_receipts ORDER BY id")
++            .fetch_all(self.database.pool())
++            .await
++            .unwrap();
++        let mail = {
++            let uploads = UploadService::new(
++                (*self.database).clone(),
++                Arc::new(LocalBlobStore::new(self._root.path().join("attachments"))),
++                AttachmentMutationCoordinator::default(),
++                UploadLimits::default(),
++            );
++            MailRepository::new((*self.database).clone(), uploads, APP_KEY)
++        };
++        for id in ids {
++            mail.ingest(id.parse().unwrap(), TimestampMillis::now())
++                .await
++                .unwrap();
++        }
++    }
++
++    /// The owner's view of a folder through the mail API.
++    async fn api(&self, path: &str) -> Value {
++        let response = self
++            .app
++            .clone()
++            .oneshot(
++                Request::builder()
++                    .uri(format!("/api/v1/workspaces/{}/mail{path}", self.workspace))
++                    .header(header::COOKIE, &self.owner_cookie)
++                    .body(Body::empty())
++                    .unwrap(),
++            )
++            .await
++            .unwrap();
++        assert_eq!(response.status(), StatusCode::OK, "{path}");
++        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        serde_json::from_slice(&bytes).unwrap()
++    }
++
++    async fn threads(&self, mailbox: Id, folder: &str) -> Vec<Value> {
++        let page = self
++            .api(&format!("/threads?folder={folder}&mailbox_id={mailbox}"))
++            .await;
++        page["items"].as_array().unwrap().clone()
++    }
++}
++
++#[tokio::test]
++async fn every_vector_gets_the_status_it_expects() {
++    // one fresh server for each vector: the nonces are distinct, but the state must not matter
++    let names: Vec<String> = Vectors::load().0["vectors"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|vector| vector["name"].as_str().unwrap().to_owned())
++        .collect();
++    assert!(names.len() >= 13);
++    let fixture = Fixture::new().await;
++    for name in names {
++        let (request, expect) = fixture.vector(&name);
++        let status = fixture.post(&request).await;
++        assert_eq!(
++            status.as_u16(),
++            expect["status"].as_u64().unwrap() as u16,
++            "{name}"
++        );
++    }
++    // the 200 vectors stored a message each (the binary one too); no 401 stored anything
++    assert_eq!(fixture.receipts().await, 6);
++}
++
++#[tokio::test]
++async fn a_delivery_shows_in_the_inbox_with_its_attachment_and_bridge_origin() {
++    let fixture = Fixture::new().await;
++    let body = b"From: Ann <ann@sender.test>\r\nTo: Owner <owner@example.com>\r\n\
++Subject: Quarterly report\r\nMessage-ID: <q1@sender.test>\r\nMIME-Version: 1.0\r\n\
++Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
++--b\r\nContent-Type: text/plain\r\n\r\nThe numbers are attached.\r\n\
++--b\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"report.pdf\"\r\n\
++Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n--b--\r\n";
++    let status = fixture
++        .post(&fixture.now_signed("success-nonce-01", body))
++        .await;
++    assert_eq!(status, StatusCode::OK);
++    fixture.ingest_all().await;
++
++    let inbox = fixture.threads(fixture.owner_mailbox, "inbox").await;
++    assert_eq!(inbox.len(), 1, "{inbox:?}");
++    assert_eq!(inbox[0]["subject"], "Quarterly report");
++    assert!(
++        fixture
++            .threads(fixture.owner_mailbox, "spam")
++            .await
++            .is_empty()
++    );
++    let detail = fixture
++        .api(&format!("/threads/{}", inbox[0]["id"].as_str().unwrap()))
++        .await;
++    let message = &detail["messages"][0];
++    assert_eq!(message["from"]["address"], "ann@sender.test");
++    assert_eq!(
++        message["body_text"].as_str().unwrap().trim(),
++        "The numbers are attached."
++    );
++    assert_eq!(message["attachments"][0]["filename"], "report.pdf");
++    // neutral: no check ran, so there is no DMARC failure (and no pass either)
++    assert_eq!(message["auth"]["dmarc"], "none");
++    assert_eq!(message["auth"]["spf"], "none");
++    assert_eq!(message["auth"]["dkim"], "none");
++
++    // the origin is the bridge and the device
++    let (source, helo): (String, String) = sqlx::query_as("SELECT source, helo FROM mail_receipts")
++        .fetch_one(fixture.database.pool())
++        .await
++        .unwrap();
++    assert_eq!(source, "bridge");
++    assert!(helo.contains(&fixture.device), "{helo}");
++}
++
++#[tokio::test]
++async fn the_destination_is_the_devices_mailbox_whatever_the_message_names() {
++    let fixture = Fixture::new().await;
++    let other: String = sqlx::query_scalar(
++        "SELECT a.local_part || '@' || d.name FROM mail_addresses a \
++         JOIN mail_domains d ON d.id = a.domain_id WHERE a.mailbox_id = $1",
++    )
++    .bind(fixture.other_mailbox.to_string())
++    .fetch_one(fixture.database.pool())
++    .await
++    .unwrap();
++    let body = format!(
++        "From: ann@sender.test\r\nTo: {other}\r\nCc: {other}\r\nBcc: {other}\r\n\
++Delivered-To: {other}\r\nX-Original-To: {other}\r\nSubject: Not for you\r\n\
++Message-ID: <x1@sender.test>\r\n\r\nHello.\r\n"
++    );
++    let request = fixture.now_signed("recipients-nonce-02", body.as_bytes());
++    assert_eq!(fixture.post(&request).await, StatusCode::OK);
++    fixture.ingest_all().await;
++    assert_eq!(
++        fixture.threads(fixture.owner_mailbox, "inbox").await.len(),
++        1
++    );
++    assert_eq!(
++        fixture
++            .count(&format!(
++                "SELECT COUNT(*) FROM mail_threads WHERE mailbox_id = '{}'",
++                fixture.other_mailbox
++            ))
++            .await,
++        0
++    );
++}
++
++#[tokio::test]
++async fn a_device_cannot_sign_for_another_devices_mailbox() {
++    let fixture = Fixture::new().await;
++    // the signature covers the first device's id: replayed against the other device's URL it fails
++    let (request, _) = fixture.vector("invalid-wrong-device-id");
++    assert!(request.path.ends_with(OTHER_DEVICE));
++    assert_eq!(fixture.post(&request).await, StatusCode::UNAUTHORIZED);
++    // a request re-pointed by hand fails the same way
++    let mut request = fixture.now_signed("cross-nonce-0003", b"Subject: x\r\n\r\ny\r\n");
++    request.path = format!("/api/v1/mail/inbound/bridge/{OTHER_DEVICE}");
++    assert_eq!(fixture.post(&request).await, StatusCode::UNAUTHORIZED);
++    assert_eq!(fixture.receipts().await, 0);
++}
++
++#[tokio::test]
++async fn a_bad_signature_is_refused_and_nothing_is_stored() {
++    let fixture = Fixture::new().await;
++    for name in ["invalid-tampered-body", "invalid-signature-garbage"] {
++        let (request, _) = fixture.vector(name);
++        assert_eq!(
++            fixture.post(&request).await,
++            StatusCode::UNAUTHORIZED,
++            "{name}"
++        );
++    }
++    assert_eq!(fixture.receipts().await, 0);
++}
++
++#[tokio::test]
++async fn timestamps_outside_the_window_are_refused_and_the_edges_pass() {
++    let fixture = Fixture::new().await;
++    for (name, status) in [
++        ("invalid-expired", StatusCode::UNAUTHORIZED),
++        ("invalid-future", StatusCode::UNAUTHORIZED),
++        ("valid-window-edge-past", StatusCode::OK),
++        ("valid-window-edge-future", StatusCode::OK),
++    ] {
++        let (request, _) = fixture.vector(name);
++        assert_eq!(fixture.post(&request).await, status, "{name}");
++    }
++}
++
++#[tokio::test]
++async fn a_repeated_nonce_is_a_replay() {
++    let fixture = Fixture::new().await;
++    let (request, _) = fixture.vector("valid-simple");
++    assert_eq!(fixture.post(&request).await, StatusCode::OK);
++    assert_eq!(fixture.post(&request).await, StatusCode::UNAUTHORIZED);
++    assert_eq!(fixture.receipts().await, 1);
++    // another nonce for the same message is not a replay (the raw message is stored once)
++    let again = fixture.now_signed("a-different-nonce", &request.body);
++    assert_eq!(fixture.post(&again).await, StatusCode::OK);
++    fixture.ingest_all().await;
++    assert_eq!(
++        fixture.threads(fixture.owner_mailbox, "inbox").await.len(),
++        1
++    );
++}
++
++#[tokio::test]
++async fn a_forged_request_does_not_use_up_a_nonce() {
++    let fixture = Fixture::new().await;
++    let (valid, _) = fixture.vector("valid-simple");
++    let mut forged = Request2 {
++        path: valid.path.clone(),
++        headers: valid.headers.clone(),
++        body: b"tampered".to_vec(),
++    };
++    assert_eq!(fixture.post(&forged).await, StatusCode::UNAUTHORIZED);
++    forged.body = valid.body.clone();
++    assert_eq!(fixture.post(&forged).await, StatusCode::OK);
++}
++
++#[tokio::test]
++async fn a_revoked_device_is_refused() {
++    let fixture = Fixture::new().await;
++    fixture
++        .registry
++        .revoke(&fixture.device, TimestampMillis::now())
++        .await
++        .unwrap();
++    let (request, _) = fixture.vector("valid-simple");
++    assert_eq!(fixture.post(&request).await, StatusCode::UNAUTHORIZED);
++    assert_eq!(fixture.receipts().await, 0);
++}
++
++#[tokio::test]
++async fn an_unknown_device_or_a_malformed_id_is_not_found() {
++    let fixture = Fixture::new().await;
++    let unknown = "11111111-2222-4333-8444-555555555555";
++    let request = fixture.signed(unknown, fixture.vectors.now(), "unknown-nonce-04", b"x");
++    assert_eq!(fixture.post(&request).await, StatusCode::NOT_FOUND);
++    // the id is compared as sent: upper case is another id
++    let (mut request, _) = fixture.vector("valid-simple");
++    request.path = format!(
++        "/api/v1/mail/inbound/bridge/{}",
++        fixture.device.to_uppercase()
++    );
++    assert_eq!(fixture.post(&request).await, StatusCode::NOT_FOUND);
++}
++
++#[tokio::test]
++async fn the_headers_must_be_present_once_and_well_formed() {
++    let fixture = Fixture::new().await;
++    let (valid, _) = fixture.vector("valid-simple");
++    let missing = |name: &str| Request2 {
++        path: valid.path.clone(),
++        headers: valid
++            .headers
++            .iter()
++            .filter(|(header, _)| !header.eq_ignore_ascii_case(name))
++            .cloned()
++            .collect(),
++        body: valid.body.clone(),
++    };
++    for name in ["X-Worbit-Timestamp", "X-Worbit-Nonce", "X-Worbit-Signature"] {
++        assert_eq!(
++            fixture.post(&missing(name)).await,
++            StatusCode::UNAUTHORIZED,
++            "{name}"
++        );
++    }
++    let mut twice = Request2 {
++        path: valid.path.clone(),
++        headers: valid.headers.clone(),
++        body: valid.body.clone(),
++    };
++    twice.headers.push(valid.headers[1].clone());
++    assert_eq!(fixture.post(&twice).await, StatusCode::UNAUTHORIZED);
++    let mut short_nonce = fixture.now_signed("short", b"x");
++    assert_eq!(fixture.post(&short_nonce).await, StatusCode::UNAUTHORIZED);
++    short_nonce.headers[0].1 = "+1790000000".to_owned();
++    assert_eq!(fixture.post(&short_nonce).await, StatusCode::UNAUTHORIZED);
++    assert_eq!(fixture.receipts().await, 0);
++}
++
++#[tokio::test]
++async fn a_body_over_two_mib_is_refused_with_413() {
++    let fixture = Fixture::new().await;
++    let limit = 2 * 1024 * 1024;
++    let mut body = b"Subject: big\r\n\r\n".to_vec();
++    body.resize(limit + 1, b'a');
++    assert_eq!(
++        fixture
++            .post(&fixture.now_signed("big-nonce-000005", &body))
++            .await,
++        StatusCode::PAYLOAD_TOO_LARGE
++    );
++    assert_eq!(fixture.receipts().await, 0);
++    // exactly the limit is accepted
++    body.truncate(limit);
++    assert_eq!(
++        fixture
++            .post(&fixture.now_signed("big-nonce-000006", &body))
++            .await,
++        StatusCode::OK
++    );
++}
++
++#[tokio::test]
++async fn the_route_is_not_found_while_the_bridge_or_mail_is_off() {
++    for (registry_on, mail_on) in [(false, true), (true, false)] {
++        let fixture = Fixture::with(registry_on, mail_on).await;
++        let (request, _) = fixture.vector("valid-simple");
++        assert_eq!(
++            fixture.post(&request).await,
++            StatusCode::NOT_FOUND,
++            "registry {registry_on}, mail {mail_on}"
++        );
++        assert_eq!(fixture.receipts().await, 0);
++    }
++}
++
++#[tokio::test]
++async fn no_header_of_the_request_becomes_an_authentication_result() {
++    let fixture = Fixture::new().await;
++    // a message that carries its own forged result for a host that is not Orbit's
++    let body = b"Authentication-Results: mx.orbit.test; dmarc=pass header.from=sender.test\r\n\
++From: ann@sender.test\r\nSubject: Forged\r\nMessage-ID: <f1@sender.test>\r\n\r\nHi.\r\n";
++    assert_eq!(
++        fixture
++            .post(&fixture.now_signed("forged-nonce-0007", body))
++            .await,
++        StatusCode::OK
++    );
++    fixture.ingest_all().await;
++    let inbox = fixture.threads(fixture.owner_mailbox, "inbox").await;
++    let detail = fixture
++        .api(&format!("/threads/{}", inbox[0]["id"].as_str().unwrap()))
++        .await;
++    assert_eq!(detail["messages"][0]["auth"]["dmarc"], "none");
++    assert!(detail["messages"][0]["auth"]["aligned_domain"].is_null());
++}
+diff --git a/apps/server/tests/openapi_contract.rs b/apps/server/tests/openapi_contract.rs
+index 37ecd93e..5b12a602 100644
+--- a/apps/server/tests/openapi_contract.rs
++++ b/apps/server/tests/openapi_contract.rs
+@@ -27,7 +27,7 @@ fn openapi_generation_is_byte_stable_and_covers_public_routes() {
+ 
+     let document: serde_json::Value = serde_json::from_str(&first).unwrap();
+     assert_eq!(document["info"]["version"], CONTRACT_ID);
+-    assert_eq!(document["paths"].as_object().unwrap().len(), 372);
++    assert_eq!(document["paths"].as_object().unwrap().len(), 373);
+     let operation_count: usize = document["paths"]
+         .as_object()
+         .unwrap()
+@@ -42,7 +42,7 @@ fn openapi_generation_is_byte_stable_and_covers_public_routes() {
+                 .count()
+         })
+         .sum();
+-    assert_eq!(operation_count, 482);
++    assert_eq!(operation_count, 483);
+     for path in [
+         "/api/v1/setup/status",
+         "/api/v1/auth/me",
+-- 
+2.56.0.windows.4
+

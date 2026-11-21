@@ -168,6 +168,39 @@ if ($null -eq $AppKeyValue) {
 
 Set-FileAclReadOnly $ConfigPath
 
+# Optional bridge device registry. The feature is on only when the env file sets
+# ORBIT_MAIL_BRIDGE_REGISTRY_PATH. The service writes the file (a temporary file
+# in the same directory, then a rename), so the ACL goes on the directory and the
+# new file inherits it. The file itself is not created here: a missing file means
+# no devices.
+$RegistryPath = Get-EnvFileValue -Path $ConfigPath -Name "ORBIT_MAIL_BRIDGE_REGISTRY_PATH"
+if ($null -ne $RegistryPath) {
+    if ($RegistryPath -eq "") {
+        throw "ORBIT_MAIL_BRIDGE_REGISTRY_PATH is set but empty in $ConfigPath"
+    }
+    if (-not [System.IO.Path]::IsPathRooted($RegistryPath)) {
+        throw "ORBIT_MAIL_BRIDGE_REGISTRY_PATH must be an absolute path: $RegistryPath"
+    }
+    $RegistryPath = [System.IO.Path]::GetFullPath($RegistryPath)
+    $RegistryDir = Split-Path -Parent $RegistryPath
+    New-Item -ItemType Directory -Force $RegistryDir | Out-Null
+    $dataRoot = [System.IO.Path]::GetFullPath($DataDir).TrimEnd('\') + '\'
+    if (-not ($RegistryDir.TrimEnd('\') + '\').StartsWith($dataRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        # Outside the data directory, so it does not inherit the data directory ACL.
+        Set-DirectoryAcl $RegistryDir
+    }
+    if (Test-Path -LiteralPath $RegistryPath) {
+        # Same principals as the app key; the service also needs to write.
+        & icacls.exe $RegistryPath /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" | Out-Null
+        Assert-ExitCode "icacls $RegistryPath"
+        if ($Account) {
+            & icacls.exe $RegistryPath /grant:r "${Account}:M" | Out-Null
+            Assert-ExitCode "icacls $RegistryPath /grant $Account"
+        }
+    }
+    Write-Host "Bridge registry: $RegistryPath"
+}
+
 $InstalledExe = Join-Path $InstallDir "orbit.exe"
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {

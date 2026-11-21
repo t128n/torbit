@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Package the Outlook bridge (`bridge/`) and its docs (`docs/bridge.md`,
+  `docs/bridge-signing.md`) in the release zip.
+- `install.ps1` reads the opt-in `ORBIT_MAIL_BRIDGE_REGISTRY_PATH`, creates its
+  directory and applies the data-directory ACL. The feature stays off unless
+  the setting is present in `worbit.env`.
+- Add `tests/packaging.tests.ps1`.
+
 ## 0.4.1+1
 
 - Rebase the patch series onto upstream Orbit `v0.4.1`. Resolve conflicts in the

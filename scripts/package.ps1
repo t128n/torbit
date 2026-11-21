@@ -39,14 +39,21 @@ foreach ($file in @("install.ps1", "uninstall.ps1", "worbit.env.example", "READM
     Copy-Item (Join-Path $windows $file) (Join-Path $stage $file)
 }
 
+# The Outlook bridge ships as scripts next to install.ps1 (bridge/bridge.ps1 and its module).
+$bridgeStage = Join-Path $stage "bridge"
+New-Item -ItemType Directory -Force $bridgeStage | Out-Null
+foreach ($file in @("bridge.ps1", "WorbitBridge.psm1")) {
+    Copy-Item (Join-Path (Join-Path $windows "bridge") $file) (Join-Path $bridgeStage $file)
+}
+
 foreach ($file in @("LICENSE", "NOTICE", "VERSION")) {
     Copy-Item (Join-Path $script:WorbitRoot $file) (Join-Path $stage $file)
 }
 
 $docs = Join-Path $stage "docs"
 New-Item -ItemType Directory -Force $docs | Out-Null
-foreach ($file in @("deploy-windows.md", "upgrade.md", "github-enterprise.md")) {
-    Copy-Item (Join-Path $script:WorbitRoot "docs" $file) (Join-Path $docs $file)
+foreach ($file in @("deploy-windows.md", "upgrade.md", "github-enterprise.md", "bridge.md", "bridge-signing.md")) {
+    Copy-Item (Join-Path (Join-Path $script:WorbitRoot "docs") $file) (Join-Path $docs $file)
 }
 
 Write-Step "Creating $zip"

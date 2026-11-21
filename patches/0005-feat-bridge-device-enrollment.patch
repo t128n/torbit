@@ -1,0 +1,1506 @@
+From d0bc0c79905a28ee7b6c322bcf916c0ab445093d Mon Sep 17 00:00:00 2001
+From: Torben <x@x.invalid>
+Date: Sat, 21 Nov 2026 17:18:34 +0100
+Subject: [PATCH] feat(mail): add Worbit bridge device enrollment
+
+---
+ apps/server/src/app.rs                |   9 +-
+ apps/server/src/cli.rs                |   6 +
+ apps/server/src/lib.rs                |   1 +
+ apps/server/src/mail_bridge.rs        | 384 +++++++++++++++++
+ apps/server/src/mail_dns.rs           |   4 +
+ apps/server/src/mail_routes/bridge.rs | 256 +++++++++++
+ apps/server/src/mail_routes/mod.rs    |  28 ++
+ apps/server/src/openapi.rs            |   3 +
+ apps/server/tests/mail_bridge.rs      | 598 ++++++++++++++++++++++++++
+ apps/server/tests/openapi_contract.rs |   4 +-
+ crates/platform/src/config.rs         |   6 +
+ crates/platform/tests/config.rs       |   5 +
+ 12 files changed, 1301 insertions(+), 3 deletions(-)
+ create mode 100644 apps/server/src/mail_bridge.rs
+ create mode 100644 apps/server/src/mail_routes/bridge.rs
+ create mode 100644 apps/server/tests/mail_bridge.rs
+
+diff --git a/apps/server/src/app.rs b/apps/server/src/app.rs
+index 9f967f4a..e9e73002 100644
+--- a/apps/server/src/app.rs
++++ b/apps/server/src/app.rs
+@@ -691,7 +691,14 @@ impl App {
+                     config.mail.content_origin.clone(),
+                 )
+                 .with_health(Arc::clone(&mail_status), mail_dns)
+-                .with_inbound_opt(provider_intake),
++                .with_inbound_opt(provider_intake)
++                .with_bridge_opt(
++                    config
++                        .mail
++                        .bridge_registry_path
++                        .clone()
++                        .map(|path| Arc::new(crate::mail_bridge::BridgeRegistry::new(path))),
++                ),
+                 webhooks: crate::webhooks::routes::WebhookState::new(
+                     Arc::clone(&identity),
+                     cookie_mode,
+diff --git a/apps/server/src/cli.rs b/apps/server/src/cli.rs
+index 06469efc..1ff27ff9 100644
+--- a/apps/server/src/cli.rs
++++ b/apps/server/src/cli.rs
+@@ -1538,6 +1538,12 @@ fn redacted_mail_config(mail: &orbit_platform::MailConfig) -> Vec<String> {
+             mail.dns_resolver.map(|address| address.to_string()),
+         ),
+         ("ORBIT_MAIL_CONTENT_ORIGIN", mail.content_origin.clone()),
++        (
++            "ORBIT_MAIL_BRIDGE_REGISTRY_PATH",
++            mail.bridge_registry_path
++                .as_ref()
++                .map(|path| path.display().to_string()),
++        ),
+     ];
+     lines.extend(
+         optional
+diff --git a/apps/server/src/lib.rs b/apps/server/src/lib.rs
+index 96a419bd..c8b1cbac 100644
+--- a/apps/server/src/lib.rs
++++ b/apps/server/src/lib.rs
+@@ -25,6 +25,7 @@ pub mod linear_import_routes;
+ pub mod link_preview;
+ pub mod live;
+ pub mod mail;
++pub mod mail_bridge;
+ pub mod mail_delivery;
+ pub mod mail_dns;
+ pub mod mail_image_proxy;
+diff --git a/apps/server/src/mail_bridge.rs b/apps/server/src/mail_bridge.rs
+new file mode 100644
+index 00000000..b4737000
+--- /dev/null
++++ b/apps/server/src/mail_bridge.rs
+@@ -0,0 +1,384 @@
++//! Worbit bridge devices: the device registry file and the destination a device delivers to.
++//!
++//! The registry is one JSON file (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`): a device id, the device's
++//! P-256 public key (SPKI DER, base64) and the mailbox address its mail goes to. It is written
++//! atomically (a temporary file in the same directory, then a rename) and read again on every
++//! call, so a missing file means no devices and a file replaced by hand is picked up. The delivery
++//! endpoint (`POST /api/v1/mail/inbound/bridge/{device_id}`) uses [`BridgeRegistry::lookup`].
++//!
++//! Each workspace gets one verified domain `<workspace id without hyphens>.bridge.invalid` (the
++//! name is unique across the instance, so it holds the workspace id) and each enrolled user a
++//! personal mailbox on it, unless the user has a personal mailbox already. No DNS is involved: the
++//! DNS check skips `.invalid` names.
++
++use std::io::Write as _;
++use std::path::{Path, PathBuf};
++
++use base64::Engine as _;
++use base64::engine::general_purpose::STANDARD;
++use orbit_platform::{Database, Id, Row as _, TimestampMillis};
++use rand_core::RngCore as _;
++use serde::{Deserialize, Serialize};
++use thiserror::Error;
++use tokio::sync::Mutex;
++
++use crate::repositories::membership;
++
++/// The suffix of the reserved domain of each workspace.
++pub const BRIDGE_DOMAIN_SUFFIX: &str = ".bridge.invalid";
++
++/// The reserved domain name of a workspace.
++#[must_use]
++pub fn bridge_domain_name(workspace_id: Id) -> String {
++    format!(
++        "{}{BRIDGE_DOMAIN_SUFFIX}",
++        workspace_id.to_string().replace('-', "")
++    )
++}
++
++/// One enrolled device.
++#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
++pub struct DeviceRecord {
++    /// Lowercase hyphenated UUID, as in the delivery URL.
++    pub device_id: String,
++    pub workspace_id: Id,
++    pub user_id: Id,
++    pub membership_id: Id,
++    pub mailbox_id: Id,
++    /// The primary address of the mailbox the device delivers to.
++    pub address_id: Id,
++    pub name: String,
++    /// SPKI DER, standard base64.
++    pub public_key: String,
++    pub created_at: i64,
++    /// Set when the device is revoked; a revoked device is refused at delivery.
++    pub revoked_at: Option<i64>,
++}
++
++#[derive(Debug, Error)]
++pub enum RegistryError {
++    #[error("bridge registry I/O failed: {0}")]
++    Io(#[from] std::io::Error),
++    #[error("bridge registry is not valid JSON: {0}")]
++    Format(#[from] serde_json::Error),
++}
++
++#[derive(Default, Serialize, Deserialize)]
++struct RegistryFile {
++    #[serde(default = "version")]
++    version: u32,
++    #[serde(default)]
++    devices: Vec<DeviceRecord>,
++}
++
++const fn version() -> u32 {
++    1
++}
++
++/// The registry file. Cheap to share (`Arc`); writes of one process are serialized.
++#[derive(Debug)]
++pub struct BridgeRegistry {
++    path: PathBuf,
++    writes: Mutex<()>,
++}
++
++impl BridgeRegistry {
++    #[must_use]
++    pub fn new(path: PathBuf) -> Self {
++        Self {
++            path,
++            writes: Mutex::new(()),
++        }
++    }
++
++    #[must_use]
++    pub fn path(&self) -> &Path {
++        &self.path
++    }
++
++    /// The device with this id (revoked ones too: the caller tells them apart).
++    pub async fn lookup(&self, device_id: &str) -> Result<Option<DeviceRecord>, RegistryError> {
++        let file = self.read().await?;
++        Ok(file
++            .devices
++            .into_iter()
++            .find(|device| device.device_id == device_id))
++    }
++
++    /// The devices a user enrolled in a workspace, oldest first.
++    pub async fn list_for_user(
++        &self,
++        workspace_id: Id,
++        user_id: Id,
++    ) -> Result<Vec<DeviceRecord>, RegistryError> {
++        let file = self.read().await?;
++        Ok(file
++            .devices
++            .into_iter()
++            .filter(|device| device.workspace_id == workspace_id && device.user_id == user_id)
++            .collect())
++    }
++
++    pub async fn add(&self, record: DeviceRecord) -> Result<(), RegistryError> {
++        let _guard = self.writes.lock().await;
++        let mut file = self.read().await?;
++        file.devices.push(record);
++        self.write(&file).await
++    }
++
++    /// Marks the device revoked at `now` (a device revoked before keeps its time). `None` when no
++    /// such device exists.
++    pub async fn revoke(
++        &self,
++        device_id: &str,
++        now: TimestampMillis,
++    ) -> Result<Option<DeviceRecord>, RegistryError> {
++        let _guard = self.writes.lock().await;
++        let mut file = self.read().await?;
++        let Some(device) = file
++            .devices
++            .iter_mut()
++            .find(|device| device.device_id == device_id)
++        else {
++            return Ok(None);
++        };
++        if device.revoked_at.is_none() {
++            device.revoked_at = Some(now.as_millis());
++            let revoked = device.clone();
++            self.write(&file).await?;
++            return Ok(Some(revoked));
++        }
++        Ok(Some(device.clone()))
++    }
++
++    async fn read(&self) -> Result<RegistryFile, RegistryError> {
++        match tokio::fs::read(&self.path).await {
++            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
++                Ok(RegistryFile::default())
++            }
++            Err(error) => Err(error.into()),
++        }
++    }
++
++    async fn write(&self, file: &RegistryFile) -> Result<(), RegistryError> {
++        let bytes = serde_json::to_vec_pretty(file)?;
++        let path = self.path.clone();
++        tokio::task::spawn_blocking(move || write_atomically(&path, &bytes))
++            .await
++            .map_err(|error| std::io::Error::other(error.to_string()))??;
++        Ok(())
++    }
++}
++
++/// Writes `bytes` to a temporary file next to `path`, syncs it and renames it over `path`.
++fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
++    let directory = path
++        .parent()
++        .filter(|directory| !directory.as_os_str().is_empty())
++        .unwrap_or_else(|| Path::new("."));
++    std::fs::create_dir_all(directory)?;
++    let mut suffix = [0_u8; 6];
++    rand_core::OsRng.fill_bytes(&mut suffix);
++    let temporary = directory.join(format!(
++        ".{}.{}.tmp",
++        path.file_name().map_or_else(
++            || "registry".to_owned(),
++            |name| name.to_string_lossy().into_owned()
++        ),
++        suffix
++            .iter()
++            .map(|byte| format!("{byte:02x}"))
++            .collect::<String>()
++    ));
++    let result = (|| {
++        let mut file = std::fs::File::create(&temporary)?;
++        file.write_all(bytes)?;
++        file.sync_all()?;
++        drop(file);
++        std::fs::rename(&temporary, path)
++    })();
++    if result.is_err() {
++        let _ = std::fs::remove_file(&temporary);
++    }
++    result
++}
++
++/// The fixed header of a P-256 SubjectPublicKeyInfo DER, before the point.
++const SPKI_P256_HEADER_LEN: usize = 26;
++/// The header, then the 65 bytes of the uncompressed point (0x04, x, y).
++const SPKI_P256_LEN: usize = SPKI_P256_HEADER_LEN + 65;
++
++/// A public key in the registry format: SPKI DER of an uncompressed NIST P-256 point, base64.
++/// Returns the canonical base64, or `None` when the key is not one.
++#[must_use]
++pub fn normalize_public_key(value: &str) -> Option<String> {
++    use p256::pkcs8::DecodePublicKey as _;
++
++    let der = STANDARD.decode(value.trim()).ok()?;
++    if der.len() != SPKI_P256_LEN || der.get(SPKI_P256_HEADER_LEN) != Some(&0x04) {
++        return None;
++    }
++    p256::PublicKey::from_public_key_der(&der).ok()?;
++    Some(STANDARD.encode(der))
++}
++
++/// Why a user cannot get a bridge mailbox.
++#[derive(Debug, Error)]
++pub enum BridgeMailboxError {
++    /// Not a member (or a guest) of the workspace.
++    #[error("not a member of the workspace")]
++    NotFound,
++    /// The user's personal mailbox is suspended, or an admin disabled the reserved domain.
++    #[error("the mailbox or the domain is not available")]
++    Unavailable,
++    #[error(transparent)]
++    Database(#[from] sqlx::Error),
++}
++
++/// Where a device's mail goes.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct BridgeMailbox {
++    pub membership_id: Id,
++    pub mailbox_id: Id,
++    pub address_id: Id,
++    /// `local@domain`.
++    pub address: String,
++}
++
++/// The personal mailbox of a member for the bridge: the one the member has, or a new one on the
++/// workspace's reserved `.invalid` domain (created, verified, when missing). Safe to call again.
++pub async fn ensure_bridge_mailbox(
++    database: &Database,
++    workspace_id: Id,
++    user_id: Id,
++) -> Result<BridgeMailbox, BridgeMailboxError> {
++    let now = database.database_now().await?.as_millis();
++    let mut transaction = database.immediate_transaction().await?;
++    membership::actor(&mut *transaction, workspace_id, user_id)
++        .await?
++        .ok_or(BridgeMailboxError::NotFound)?;
++    let row = sqlx::query(
++        "SELECT ms.id AS membership_id, u.display_name FROM memberships ms \
++         JOIN users u ON u.id = ms.user_id WHERE ms.workspace_id = $1 AND ms.user_id = $2",
++    )
++    .bind(workspace_id.to_string())
++    .bind(user_id.to_string())
++    .fetch_optional(&mut *transaction)
++    .await?
++    .ok_or(BridgeMailboxError::NotFound)?;
++    let membership_text: String = row.try_get("membership_id")?;
++    let display_name: String = row.try_get("display_name")?;
++    let membership_id = parse(&membership_text)?;
++
++    let existing = sqlx::query(
++        "SELECT m.id AS mailbox_id, m.status, a.id AS address_id, a.local_part, d.name \
++         FROM mailboxes m \
++         JOIN mail_addresses a ON a.mailbox_id = m.id AND a.kind = 'primary' \
++         JOIN mail_domains d ON d.id = a.domain_id \
++         WHERE m.owner_membership_id = $1",
++    )
++    .bind(&membership_text)
++    .fetch_optional(&mut *transaction)
++    .await?;
++    if let Some(row) = existing {
++        let status: String = row.try_get("status")?;
++        if status != "active" {
++            return Err(BridgeMailboxError::Unavailable);
++        }
++        let local: String = row.try_get("local_part")?;
++        let domain: String = row.try_get("name")?;
++        let found = BridgeMailbox {
++            membership_id,
++            mailbox_id: parse(&row.try_get::<String, _>("mailbox_id")?)?,
++            address_id: parse(&row.try_get::<String, _>("address_id")?)?,
++            address: format!("{local}@{domain}"),
++        };
++        transaction.commit().await?;
++        return Ok(found);
++    }
++
++    let name = bridge_domain_name(workspace_id);
++    let domain =
++        sqlx::query("SELECT id, status FROM mail_domains WHERE workspace_id = $1 AND name = $2")
++            .bind(workspace_id.to_string())
++            .bind(&name)
++            .fetch_optional(&mut *transaction)
++            .await?;
++    let domain_id =
++        if let Some(row) = domain {
++            let status: String = row.try_get("status")?;
++            if status != "verified" {
++                return Err(BridgeMailboxError::Unavailable);
++            }
++            parse(&row.try_get::<String, _>("id")?)?
++        } else {
++            let id = Id::new_v7();
++            let mut token = [0_u8; 16];
++            rand_core::OsRng.fill_bytes(&mut token);
++            sqlx::query(
++            "INSERT INTO mail_domains (id, workspace_id, name, status, verify_token, verified_at, \
++             created_at, updated_at) VALUES ($1, $2, $3, 'verified', $4, $5, $5, $5)",
++        )
++        .bind(id.to_string())
++        .bind(workspace_id.to_string())
++        .bind(&name)
++        .bind(token.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
++        .bind(now)
++        .execute(&mut *transaction)
++        .await?;
++            id
++        };
++
++    let mailbox_id = Id::new_v7();
++    let address_id = Id::new_v7();
++    let local = membership_text.replace('-', "");
++    let mailbox_name: String = display_name.chars().take(120).collect();
++    sqlx::query(
++        "INSERT INTO mailboxes (id, workspace_id, kind, name, owner_membership_id, status, \
++         created_at, updated_at) VALUES ($1, $2, 'personal', $3, $4, 'active', $5, $5)",
++    )
++    .bind(mailbox_id.to_string())
++    .bind(workspace_id.to_string())
++    .bind(if mailbox_name.is_empty() {
++        "Worbit"
++    } else {
++        &mailbox_name
++    })
++    .bind(&membership_text)
++    .bind(now)
++    .execute(&mut *transaction)
++    .await?;
++    sqlx::query(
++        "INSERT INTO mailbox_members (mailbox_id, membership_id, created_at) VALUES ($1, $2, $3)",
++    )
++    .bind(mailbox_id.to_string())
++    .bind(&membership_text)
++    .bind(now)
++    .execute(&mut *transaction)
++    .await?;
++    sqlx::query(
++        "INSERT INTO mail_addresses (id, domain_id, mailbox_id, local_part, kind, created_at) \
++         VALUES ($1, $2, $3, $4, 'primary', $5)",
++    )
++    .bind(address_id.to_string())
++    .bind(domain_id.to_string())
++    .bind(mailbox_id.to_string())
++    .bind(&local)
++    .bind(now)
++    .execute(&mut *transaction)
++    .await?;
++    transaction.commit().await?;
++    Ok(BridgeMailbox {
++        membership_id,
++        mailbox_id,
++        address_id,
++        address: format!("{local}@{name}"),
++    })
++}
++
++fn parse(value: &str) -> Result<Id, sqlx::Error> {
++    value
++        .parse()
++        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
++}
+diff --git a/apps/server/src/mail_dns.rs b/apps/server/src/mail_dns.rs
+index 4fd7b07a..3e5d184c 100644
+--- a/apps/server/src/mail_dns.rs
++++ b/apps/server/src/mail_dns.rs
+@@ -827,6 +827,10 @@ impl DnsChecker {
+         let Some(domain) = self.repository.domain_for_check(domain_id).await? else {
+             return Ok(None);
+         };
++        // The reserved domain of the Worbit bridge has no DNS: nothing to verify, nothing to suspend.
++        if domain.name.ends_with(".invalid") {
++            return Ok(Some(domain.status));
++        }
+         let report = inspect(
+             self.dns.as_ref(),
+             &domain,
+diff --git a/apps/server/src/mail_routes/bridge.rs b/apps/server/src/mail_routes/bridge.rs
+new file mode 100644
+index 00000000..37711961
+--- /dev/null
++++ b/apps/server/src/mail_routes/bridge.rs
+@@ -0,0 +1,256 @@
++//! Worbit bridge devices: enroll, list and revoke. Session-authenticated. The routes answer 404
++//! while the registry path is not configured or mail is off on the instance. A member sees and
++//! revokes their own devices; a workspace owner or admin can revoke any device of the workspace.
++
++use std::sync::Arc;
++
++use axum::Json;
++use axum::extract::{Path, State};
++use axum::http::{HeaderMap, StatusCode, Uri};
++use orbit_domain::Permission;
++use orbit_platform::{Id, TimestampMillis};
++use serde::{Deserialize, Serialize};
++use utoipa::ToSchema;
++
++use super::{MailState, RequestIdExtension, problem};
++use crate::mail_bridge::{
++    BridgeMailboxError, BridgeRegistry, DeviceRecord, ensure_bridge_mailbox, normalize_public_key,
++};
++use crate::repositories::instance_settings::InstanceSettingsRepository;
++use crate::repositories::mail::MailError;
++use crate::repositories::membership;
++use crate::task_routes::{ApiError, ApiJson, authenticate_session};
++
++/// An enrolled device. The public key stays in the registry.
++#[derive(Serialize, ToSchema)]
++pub(crate) struct BridgeDevice {
++    /// The id in the delivery URL.
++    id: String,
++    name: String,
++    /// The mailbox address the device delivers to.
++    address: String,
++    #[schema(value_type = String)]
++    mailbox_id: Id,
++    #[schema(value_type = String, format = DateTime)]
++    created_at: TimestampMillis,
++    /// Set once the device is revoked.
++    #[schema(value_type = Option<String>, format = DateTime)]
++    revoked_at: Option<TimestampMillis>,
++}
++
++#[derive(Deserialize, ToSchema)]
++#[serde(deny_unknown_fields)]
++pub(crate) struct EnrollBridgeDeviceBody {
++    /// A name for the device (1 to 80 characters).
++    name: String,
++    /// The device's P-256 public key: SubjectPublicKeyInfo DER, base64.
++    public_key: String,
++}
++
++struct Call<'a> {
++    registry: Arc<BridgeRegistry>,
++    workspace_id: Id,
++    user_id: Id,
++    instance: String,
++    request_id: Option<&'a axum::extract::Extension<orbit_platform::RequestId>>,
++}
++
++impl<'a> Call<'a> {
++    async fn enter(
++        state: &MailState,
++        headers: &HeaderMap,
++        uri: &Uri,
++        workspace: &str,
++        request_id: &'a RequestIdExtension,
++    ) -> Result<Self, ApiError> {
++        let instance = uri.path().to_owned();
++        let request_id = request_id.as_ref();
++        let not_found = || problem(MailError::NotFound, &instance, request_id);
++        // off: no registry path, or mail is off on the instance
++        let registry = state.bridge.clone().ok_or_else(not_found)?;
++        let enabled = InstanceSettingsRepository::new(state.identity.database().clone())
++            .mail_enabled()
++            .await
++            .map_err(|error| problem(MailError::Unavailable(error), &instance, request_id))?;
++        if !enabled {
++            return Err(not_found());
++        }
++        let session = authenticate_session(
++            &state.identity,
++            state.cookie_mode,
++            headers,
++            &instance,
++            request_id,
++        )
++        .await?;
++        let workspace_id = workspace.parse().map_err(|_| not_found())?;
++        Ok(Self {
++            registry,
++            workspace_id,
++            user_id: session.user.id,
++            instance,
++            request_id,
++        })
++    }
++
++    fn problem(&self, error: MailError) -> ApiError {
++        problem(error, &self.instance, self.request_id)
++    }
++
++    fn registry_error(&self, error: &crate::mail_bridge::RegistryError) -> ApiError {
++        tracing::error!(error = %error, "bridge registry");
++        ApiError::new(
++            StatusCode::INTERNAL_SERVER_ERROR,
++            "internal_error",
++            "Internal server error",
++            "An unexpected error occurred. Use the request ID when contacting support.",
++            &self.instance,
++            self.request_id,
++        )
++        .cause(error.to_string())
++    }
++
++    async fn device(
++        &self,
++        state: &MailState,
++        record: DeviceRecord,
++    ) -> Result<BridgeDevice, ApiError> {
++        let address: Option<String> = sqlx::query_scalar(
++            "SELECT a.local_part || '@' || d.name FROM mail_addresses a \
++             JOIN mail_domains d ON d.id = a.domain_id WHERE a.id = $1",
++        )
++        .bind(record.address_id.to_string())
++        .fetch_optional(state.mail.database().pool())
++        .await
++        .map_err(|error| self.problem(MailError::Unavailable(error)))?;
++        Ok(BridgeDevice {
++            id: record.device_id,
++            name: record.name,
++            address: address.unwrap_or_default(),
++            mailbox_id: record.mailbox_id,
++            created_at: TimestampMillis::from_millis(record.created_at),
++            revoked_at: record.revoked_at.map(TimestampMillis::from_millis),
++        })
++    }
++}
++
++/// Enrolls a device of the caller: registers its public key and gives it the caller's personal
++/// mailbox (created on the workspace's reserved `.invalid` domain when the caller has none).
++#[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/mail/bridge/devices", params(("workspace_id" = String, Path)), request_body = EnrollBridgeDeviceBody, responses((status = 201, body = BridgeDevice)))]
++pub(crate) async fn enroll_bridge_device(
++    State(state): State<MailState>,
++    Path(workspace): Path<String>,
++    headers: HeaderMap,
++    uri: Uri,
++    request_id: RequestIdExtension,
++    ApiJson(body): ApiJson<EnrollBridgeDeviceBody>,
++) -> Result<(StatusCode, Json<BridgeDevice>), ApiError> {
++    let call = Call::enter(&state, &headers, &uri, &workspace, &request_id).await?;
++    let name = body.name.trim();
++    if name.is_empty() || name.chars().count() > 80 {
++        return Err(call.problem(MailError::Invalid { field: "name" }));
++    }
++    let public_key = normalize_public_key(&body.public_key).ok_or_else(|| {
++        call.problem(MailError::Invalid {
++            field: "public_key",
++        })
++    })?;
++    let mailbox = ensure_bridge_mailbox(state.mail.database(), call.workspace_id, call.user_id)
++        .await
++        .map_err(|error| match error {
++            BridgeMailboxError::NotFound => call.problem(MailError::NotFound),
++            BridgeMailboxError::Unavailable => {
++                call.problem(MailError::Conflict("bridge_mailbox_unavailable"))
++            }
++            BridgeMailboxError::Database(error) => call.problem(MailError::Unavailable(error)),
++        })?;
++    let now = state
++        .mail
++        .database()
++        .database_now()
++        .await
++        .map_err(|error| call.problem(MailError::Unavailable(error)))?;
++    let record = DeviceRecord {
++        device_id: Id::new_v7().to_string(),
++        workspace_id: call.workspace_id,
++        user_id: call.user_id,
++        membership_id: mailbox.membership_id,
++        mailbox_id: mailbox.mailbox_id,
++        address_id: mailbox.address_id,
++        name: name.to_owned(),
++        public_key,
++        created_at: now.as_millis(),
++        revoked_at: None,
++    };
++    call.registry
++        .add(record.clone())
++        .await
++        .map_err(|error| call.registry_error(&error))?;
++    let device = call.device(&state, record).await?;
++    Ok((StatusCode::CREATED, Json(device)))
++}
++
++/// The caller's own devices in this workspace, revoked ones included.
++#[utoipa::path(get, path = "/api/v1/workspaces/{workspace_id}/mail/bridge/devices", params(("workspace_id" = String, Path)), responses((status = 200, body = Vec<BridgeDevice>)))]
++pub(crate) async fn list_bridge_devices(
++    State(state): State<MailState>,
++    Path(workspace): Path<String>,
++    headers: HeaderMap,
++    uri: Uri,
++    request_id: RequestIdExtension,
++) -> Result<Json<Vec<BridgeDevice>>, ApiError> {
++    let call = Call::enter(&state, &headers, &uri, &workspace, &request_id).await?;
++    let records = call
++        .registry
++        .list_for_user(call.workspace_id, call.user_id)
++        .await
++        .map_err(|error| call.registry_error(&error))?;
++    let mut devices = Vec::with_capacity(records.len());
++    for record in records {
++        devices.push(call.device(&state, record).await?);
++    }
++    Ok(Json(devices))
++}
++
++/// Revokes a device: the delivery endpoint refuses it from now on. The device's owner and workspace
++/// owners and admins can revoke it; for anyone else the device does not exist. Revoking a revoked
++/// device succeeds.
++#[utoipa::path(delete, path = "/api/v1/workspaces/{workspace_id}/mail/bridge/devices/{device_id}", params(("workspace_id" = String, Path), ("device_id" = String, Path)), responses((status = 204)))]
++pub(crate) async fn revoke_bridge_device(
++    State(state): State<MailState>,
++    Path((workspace, device_id)): Path<(String, String)>,
++    headers: HeaderMap,
++    uri: Uri,
++    request_id: RequestIdExtension,
++) -> Result<StatusCode, ApiError> {
++    let call = Call::enter(&state, &headers, &uri, &workspace, &request_id).await?;
++    let device = call
++        .registry
++        .lookup(&device_id)
++        .await
++        .map_err(|error| call.registry_error(&error))?
++        .filter(|device| device.workspace_id == call.workspace_id)
++        .ok_or_else(|| call.problem(MailError::NotFound))?;
++    let actor = membership::actor(
++        state.mail.database().pool(),
++        call.workspace_id,
++        call.user_id,
++    )
++    .await
++    .map_err(|error| call.problem(MailError::Unavailable(error)))?
++    .ok_or_else(|| call.problem(MailError::NotFound))?;
++    if device.user_id != call.user_id && !actor.can(Permission::MailManage) {
++        return Err(call.problem(MailError::NotFound));
++    }
++    let now = state
++        .mail
++        .database()
++        .database_now()
++        .await
++        .map_err(|error| call.problem(MailError::Unavailable(error)))?;
++    call.registry
++        .revoke(&device.device_id, now)
++        .await
++        .map_err(|error| call.registry_error(&error))?;
++    Ok(StatusCode::NO_CONTENT)
++}
+diff --git a/apps/server/src/mail_routes/mod.rs b/apps/server/src/mail_routes/mod.rs
+index af7868bd..a1f33ee5 100644
+--- a/apps/server/src/mail_routes/mod.rs
++++ b/apps/server/src/mail_routes/mod.rs
+@@ -3,6 +3,7 @@
+ //! is for instance admins only.
+ 
+ pub(crate) mod admin;
++pub(crate) mod bridge;
+ pub(crate) mod content;
+ pub(crate) mod domains;
+ pub(crate) mod inbound;
+@@ -60,6 +61,8 @@ pub struct MailState {
+     pub(crate) dns: Arc<dyn DnsLookup>,
+     /// Mail from providers' webhooks; `None`: the route answers 503.
+     pub(crate) inbound: Option<Arc<ProviderIntake>>,
++    /// Worbit bridge devices; `None`: the bridge routes answer 404.
++    pub(crate) bridge: Option<Arc<crate::mail_bridge::BridgeRegistry>>,
+ }
+ 
+ impl MailState {
+@@ -82,9 +85,26 @@ impl MailState {
+             listener: Arc::default(),
+             dns: Arc::new(HickoryDns::new(None)),
+             inbound: None,
++            bridge: None,
+         }
+     }
+ 
++    #[must_use]
++    pub(crate) fn with_bridge_opt(
++        mut self,
++        registry: Option<Arc<crate::mail_bridge::BridgeRegistry>>,
++    ) -> Self {
++        self.bridge = registry;
++        self
++    }
++
++    /// Turns on the Worbit bridge device routes (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`).
++    #[must_use]
++    pub fn with_bridge(mut self, registry: Arc<crate::mail_bridge::BridgeRegistry>) -> Self {
++        self.bridge = Some(registry);
++        self
++    }
++
+     /// Receives mail from providers' webhooks.
+     #[must_use]
+     pub fn with_inbound(mut self, inbound: Arc<ProviderIntake>) -> Self {
+@@ -166,6 +186,14 @@ pub fn mail_router(state: MailState) -> Router {
+             "/api/v1/mail/inbound/{kind}/{provider_id}/mime",
+             post(inbound::post_inbound),
+         )
++        .route(
++            "/api/v1/workspaces/{workspace_id}/mail/bridge/devices",
++            get(bridge::list_bridge_devices).post(bridge::enroll_bridge_device),
++        )
++        .route(
++            "/api/v1/workspaces/{workspace_id}/mail/bridge/devices/{device_id}",
++            delete(bridge::revoke_bridge_device),
++        )
+         .route(
+             "/api/v1/workspaces/{workspace_id}/mail/domains",
+             get(domains::list_mail_domains).post(domains::create_mail_domain),
+diff --git a/apps/server/src/openapi.rs b/apps/server/src/openapi.rs
+index fcd50078..c3cd2d94 100644
+--- a/apps/server/src/openapi.rs
++++ b/apps/server/src/openapi.rs
+@@ -427,6 +427,9 @@ pub const CONTRACT_ID: &str = "orbit-api-v1";
+         crate::chat_routes::stickers::create_chat_sticker,
+         crate::chat_routes::stickers::delete_chat_sticker,
+         crate::chat_routes::stickers::get_chat_sticker_image,
++        crate::mail_routes::bridge::list_bridge_devices,
++        crate::mail_routes::bridge::enroll_bridge_device,
++        crate::mail_routes::bridge::revoke_bridge_device,
+         crate::mail_routes::domains::list_mail_domains,
+         crate::mail_routes::domains::create_mail_domain,
+         crate::mail_routes::domains::get_mail_domain,
+diff --git a/apps/server/tests/mail_bridge.rs b/apps/server/tests/mail_bridge.rs
+new file mode 100644
+index 00000000..b5648f9e
+--- /dev/null
++++ b/apps/server/tests/mail_bridge.rs
+@@ -0,0 +1,598 @@
++//! Worbit bridge device enrollment: the registry file, the enrollment, list and revoke API, the
++//! per-workspace `.invalid` domain with the user's personal mailbox, and the DNS check that
++//! leaves that domain alone.
++
++use std::path::PathBuf;
++use std::sync::Arc;
++
++use axum::body::{Body, to_bytes};
++use axum::http::{Request, StatusCode, header};
++use orbit_platform::{
++    AttachmentMutationCoordinator, AuthenticatedUser, Id, LocalBlobStore, MailMode, TestDatabase,
++    TimestampMillis, UploadLimits, UploadService,
++};
++use orbit_server::auth_routes::CookieMode;
++use orbit_server::mail_bridge::BridgeRegistry;
++use orbit_server::mail_dns::{DnsChecker, FakeDns};
++use orbit_server::mail_routes::{MailSettings, MailState, mail_router};
++use orbit_server::repositories::identity::{IdentityRepository, SetupRequest};
++use orbit_server::repositories::instance_settings::InstanceSettingsRepository;
++use orbit_server::repositories::mail::{DomainStatus, MailRepository};
++use serde_json::{Value, json};
++use tower::ServiceExt;
++
++const APP_KEY: [u8; 32] = [7; 32];
++/// The throwaway P-256 key of `tests/bridge-vectors.json` (SPKI DER, base64).
++const PUBLIC_KEY: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEVWdz1M4dMUeIDjHe5q2Bldyuj+17hs/6Uzy0Yh472OokRcmePszhH703VTFrmEhLqMst+TROwubj/+ZKLmwl1Q==";
++
++struct Member {
++    id: Id,
++    membership_id: Id,
++    cookie: String,
++}
++
++struct Fixture {
++    _root: tempfile::TempDir,
++    registry_path: PathBuf,
++    database: TestDatabase,
++    identity: Arc<IdentityRepository>,
++    mail: Arc<MailRepository>,
++    registry: Arc<BridgeRegistry>,
++    app: axum::Router,
++    workspace: Id,
++    owner: Member,
++}
++
++impl Fixture {
++    async fn new() -> Self {
++        Self::with(true, true).await
++    }
++
++    /// `registry`: the registry path is configured; `mail`: the instance mail switch is on.
++    async fn with(registry: bool, mail: bool) -> Self {
++        let database = TestDatabase::new().await.unwrap();
++        let identity = Arc::new(IdentityRepository::new((*database).clone()));
++        let now = TimestampMillis::now();
++        identity
++            .store_setup_token(
++                "operator-secret",
++                TimestampMillis::from_millis(now.as_millis() + 60_000),
++            )
++            .await
++            .unwrap();
++        let setup = identity
++            .complete_setup(
++                SetupRequest {
++                    token: "operator-secret".to_owned(),
++                    email: "owner@example.com".to_owned(),
++                    display_name: "Owner".to_owned(),
++                    password_hash: "unused".to_owned(),
++                    workspace_name: "Orbit".to_owned(),
++                    project_name: "General".to_owned(),
++                },
++                now,
++            )
++            .await
++            .unwrap();
++        InstanceSettingsRepository::new((*database).clone())
++            .set_mail_enabled(setup.user_id, mail, "request", now)
++            .await
++            .unwrap();
++        let root = tempfile::tempdir().unwrap();
++        let uploads = UploadService::new(
++            (*database).clone(),
++            Arc::new(LocalBlobStore::new(root.path().join("attachments"))),
++            AttachmentMutationCoordinator::default(),
++            UploadLimits::default(),
++        );
++        let mail_repo = Arc::new(MailRepository::new((*database).clone(), uploads, APP_KEY));
++        // A directory that does not exist yet: the registry creates it with the first device.
++        let registry_path = root.path().join("bridge").join("devices.json");
++        let bridge = Arc::new(BridgeRegistry::new(registry_path.clone()));
++        let mut state = MailState::new(
++            Arc::clone(&identity),
++            Arc::clone(&mail_repo),
++            CookieMode::secure(),
++            MailSettings {
++                enabled: false,
++                hostname: None,
++                mode: MailMode::Relay,
++            },
++        );
++        if registry {
++            state = state.with_bridge(Arc::clone(&bridge));
++        }
++        let membership: String = sqlx::query_scalar(
++            "SELECT id FROM memberships WHERE workspace_id = $1 AND user_id = $2",
++        )
++        .bind(setup.workspace_id.to_string())
++        .bind(setup.user_id.to_string())
++        .fetch_one(database.pool())
++        .await
++        .unwrap();
++        Self {
++            _root: root,
++            registry_path,
++            database,
++            identity,
++            mail: mail_repo,
++            registry: bridge,
++            app: mail_router(state),
++            workspace: setup.workspace_id,
++            owner: Member {
++                id: setup.user_id,
++                membership_id: membership.parse().unwrap(),
++                cookie: format!("__Host-orbit_session={}", setup.session.token),
++            },
++        }
++    }
++
++    async fn user(&self, role: &str) -> Member {
++        let id = Id::new_v7();
++        let now = TimestampMillis::now();
++        let email = format!("{id}@example.com");
++        sqlx::query(
++            "INSERT INTO users (id, email, normalized_email, display_name, password_hash, created_at, updated_at) \
++             VALUES ($1, $2, $3, 'Member', 'unused', $4, $4)",
++        )
++        .bind(id.to_string())
++        .bind(&email)
++        .bind(&email)
++        .bind(now.as_millis())
++        .execute(self.database.pool())
++        .await
++        .unwrap();
++        let membership_id = Id::new_v7();
++        sqlx::query(
++            "INSERT INTO memberships (id, workspace_id, user_id, role, version, created_at, updated_at) \
++             VALUES ($1, $2, $3, $4, 0, $5, $5)",
++        )
++        .bind(membership_id.to_string())
++        .bind(self.workspace.to_string())
++        .bind(id.to_string())
++        .bind(role)
++        .bind(now.as_millis())
++        .execute(self.database.pool())
++        .await
++        .unwrap();
++        let session = self
++            .identity
++            .create_session(
++                &AuthenticatedUser {
++                    id,
++                    email,
++                    display_name: "Member".to_owned(),
++                },
++                now,
++            )
++            .await
++            .unwrap();
++        Member {
++            id,
++            membership_id,
++            cookie: format!("__Host-orbit_session={}", session.token),
++        }
++    }
++
++    async fn call(
++        &self,
++        cookie: Option<&str>,
++        method: &str,
++        path: &str,
++        body: Option<Value>,
++    ) -> (StatusCode, Value) {
++        let mut builder = Request::builder().method(method).uri(format!(
++            "/api/v1/workspaces/{}/mail/bridge/devices{path}",
++            self.workspace
++        ));
++        if let Some(cookie) = cookie {
++            builder = builder.header(header::COOKIE, cookie);
++        }
++        let request = match body {
++            Some(value) => builder
++                .header(header::CONTENT_TYPE, "application/json")
++                .body(Body::from(value.to_string())),
++            None => builder.body(Body::empty()),
++        }
++        .unwrap();
++        let response = self.app.clone().oneshot(request).await.unwrap();
++        let status = response.status();
++        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let value = if bytes.is_empty() {
++            Value::Null
++        } else {
++            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
++        };
++        (status, value)
++    }
++
++    async fn enroll(&self, member: &Member, name: &str) -> (StatusCode, Value) {
++        self.call(
++            Some(&member.cookie),
++            "POST",
++            "",
++            Some(json!({ "name": name, "public_key": PUBLIC_KEY })),
++        )
++        .await
++    }
++
++    async fn count(&self, sql: &str) -> i64 {
++        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
++            .fetch_one(self.database.pool())
++            .await
++            .unwrap()
++    }
++}
++
++#[tokio::test]
++async fn enrollment_registers_the_device_and_creates_domain_and_mailbox() {
++    let fixture = Fixture::new().await;
++    let (status, device) = fixture.enroll(&fixture.owner, "Work laptop").await;
++    assert_eq!(status, StatusCode::CREATED, "{device}");
++
++    let device_id = device["id"].as_str().unwrap();
++    assert_eq!(device_id.len(), 36);
++    assert_eq!(device_id, device_id.to_lowercase());
++    assert_eq!(device["name"], "Work laptop");
++    assert_eq!(device["revoked_at"], Value::Null);
++    let domain = format!(
++        "{}.bridge.invalid",
++        fixture.workspace.to_string().replace('-', "")
++    );
++    assert!(
++        device["address"]
++            .as_str()
++            .unwrap()
++            .ends_with(&format!("@{domain}")),
++        "{device}"
++    );
++
++    // the domain is verified, without a provider, and the mailbox is the owner's personal one
++    let verified = fixture
++        .count(&format!(
++            "SELECT COUNT(*) FROM mail_domains WHERE name = '{domain}' AND status = 'verified' \
++             AND provider_id IS NULL AND workspace_id = '{}'",
++            fixture.workspace
++        ))
++        .await;
++    assert_eq!(verified, 1);
++    let personal = fixture
++        .count(&format!(
++            "SELECT COUNT(*) FROM mailboxes WHERE kind = 'personal' AND status = 'active' \
++             AND owner_membership_id = '{}'",
++            fixture.owner.membership_id
++        ))
++        .await;
++    assert_eq!(personal, 1);
++
++    // the registry file holds the key and the destination, for the delivery endpoint
++    let record = fixture.registry.lookup(device_id).await.unwrap().unwrap();
++    assert_eq!(record.public_key, PUBLIC_KEY);
++    assert_eq!(record.workspace_id, fixture.workspace);
++    assert_eq!(record.user_id, fixture.owner.id);
++    assert_eq!(record.revoked_at, None);
++    let mailbox_address: String = sqlx::query_scalar(
++        "SELECT a.id FROM mail_addresses a JOIN mailboxes m ON m.id = a.mailbox_id \
++         WHERE m.owner_membership_id = $1 AND a.kind = 'primary'",
++    )
++    .bind(fixture.owner.membership_id.to_string())
++    .fetch_one(fixture.database.pool())
++    .await
++    .unwrap();
++    assert_eq!(record.address_id.to_string(), mailbox_address);
++    assert!(
++        fixture
++            .registry
++            .lookup("not-a-device")
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn a_second_device_reuses_the_domain_and_the_mailbox() {
++    let fixture = Fixture::new().await;
++    let member = fixture.user("member").await;
++    let (_, first) = fixture.enroll(&member, "Laptop").await;
++    let (status, second) = fixture.enroll(&member, "Desktop").await;
++    assert_eq!(status, StatusCode::CREATED);
++    assert_ne!(first["id"], second["id"]);
++    assert_eq!(first["address"], second["address"]);
++    assert_eq!(
++        fixture
++            .count("SELECT COUNT(*) FROM mail_domains WHERE name LIKE '%.bridge.invalid'")
++            .await,
++        1
++    );
++    assert_eq!(
++        fixture
++            .count("SELECT COUNT(*) FROM mailboxes WHERE kind = 'personal' AND owner_membership_id IS NOT NULL")
++            .await,
++        1
++    );
++    // a second member gets a mailbox of their own on the same domain
++    let other = fixture.user("member").await;
++    let (status, third) = fixture.enroll(&other, "Laptop").await;
++    assert_eq!(status, StatusCode::CREATED);
++    assert_ne!(first["address"], third["address"]);
++    assert_eq!(
++        fixture
++            .count("SELECT COUNT(*) FROM mail_domains WHERE name LIKE '%.bridge.invalid'")
++            .await,
++        1
++    );
++}
++
++#[tokio::test]
++async fn a_member_with_a_personal_mailbox_keeps_it() {
++    let fixture = Fixture::new().await;
++    let member = fixture.user("member").await;
++    let now = TimestampMillis::now().as_millis();
++    let domain = Id::new_v7().to_string();
++    let mailbox = Id::new_v7().to_string();
++    let address = Id::new_v7().to_string();
++    for (sql, binds) in [
++        (
++            format!(
++                "INSERT INTO mail_domains (id, workspace_id, name, status, verify_token, created_at, updated_at) \
++                 VALUES ($1, $2, 'real.test', 'verified', 't', {now}, {now})"
++            ),
++            vec![domain.clone(), fixture.workspace.to_string()],
++        ),
++        (
++            format!(
++                "INSERT INTO mailboxes (id, workspace_id, kind, name, owner_membership_id, status, created_at, updated_at) \
++                 VALUES ($1, $2, 'personal', 'Member', $3, 'active', {now}, {now})"
++            ),
++            vec![
++                mailbox.clone(),
++                fixture.workspace.to_string(),
++                member.membership_id.to_string(),
++            ],
++        ),
++        (
++            format!(
++                "INSERT INTO mail_addresses (id, domain_id, mailbox_id, local_part, kind, created_at) \
++                 VALUES ($1, $2, $3, 'member', 'primary', {now})"
++            ),
++            vec![address.clone(), domain, mailbox],
++        ),
++    ] {
++        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
++        for bind in &binds {
++            query = query.bind(bind);
++        }
++        query.execute(fixture.database.pool()).await.unwrap();
++    }
++    let (status, device) = fixture.enroll(&member, "Laptop").await;
++    assert_eq!(status, StatusCode::CREATED, "{device}");
++    assert_eq!(device["address"], "member@real.test");
++    let record = fixture
++        .registry
++        .lookup(device["id"].as_str().unwrap())
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(record.address_id.to_string(), address);
++}
++
++#[tokio::test]
++async fn list_shows_only_the_callers_devices() {
++    let fixture = Fixture::new().await;
++    let member = fixture.user("member").await;
++    // a missing registry file means no devices
++    assert!(!fixture.registry_path.exists());
++    let (status, list) = fixture.call(Some(&member.cookie), "GET", "", None).await;
++    assert_eq!(status, StatusCode::OK);
++    assert_eq!(list, json!([]));
++
++    let (_, mine) = fixture.enroll(&member, "Mine").await;
++    fixture.enroll(&fixture.owner, "Owner's").await;
++    let (status, list) = fixture.call(Some(&member.cookie), "GET", "", None).await;
++    assert_eq!(status, StatusCode::OK);
++    let list = list.as_array().unwrap();
++    assert_eq!(list.len(), 1);
++    assert_eq!(list[0]["id"], mine["id"]);
++    assert_eq!(list[0]["name"], "Mine");
++    assert!(list[0].get("public_key").is_none());
++}
++
++#[tokio::test]
++async fn revoke_marks_the_device_revoked_for_its_owner_and_for_admins() {
++    let fixture = Fixture::new().await;
++    let member = fixture.user("member").await;
++    let other = fixture.user("member").await;
++    let (_, mine) = fixture.enroll(&member, "Mine").await;
++    let id = mine["id"].as_str().unwrap();
++
++    // another member cannot see it, let alone revoke it
++    let (status, _) = fixture
++        .call(Some(&other.cookie), "DELETE", &format!("/{id}"), None)
++        .await;
++    assert_eq!(status, StatusCode::NOT_FOUND);
++    assert_eq!(
++        fixture
++            .registry
++            .lookup(id)
++            .await
++            .unwrap()
++            .unwrap()
++            .revoked_at,
++        None
++    );
++
++    // the owner of the device revokes it
++    let (status, _) = fixture
++        .call(Some(&member.cookie), "DELETE", &format!("/{id}"), None)
++        .await;
++    assert_eq!(status, StatusCode::NO_CONTENT);
++    let record = fixture.registry.lookup(id).await.unwrap().unwrap();
++    assert!(record.revoked_at.is_some());
++    let (_, list) = fixture.call(Some(&member.cookie), "GET", "", None).await;
++    assert!(list[0]["revoked_at"].is_string() || list[0]["revoked_at"].is_number());
++
++    // revoking again is fine and changes nothing
++    let (status, _) = fixture
++        .call(Some(&member.cookie), "DELETE", &format!("/{id}"), None)
++        .await;
++    assert_eq!(status, StatusCode::NO_CONTENT);
++
++    // a workspace admin revokes the device of another member
++    let (_, theirs) = fixture.enroll(&other, "Theirs").await;
++    let theirs = theirs["id"].as_str().unwrap();
++    let (status, _) = fixture
++        .call(
++            Some(&fixture.owner.cookie),
++            "DELETE",
++            &format!("/{theirs}"),
++            None,
++        )
++        .await;
++    assert_eq!(status, StatusCode::NO_CONTENT);
++    assert!(
++        fixture
++            .registry
++            .lookup(theirs)
++            .await
++            .unwrap()
++            .unwrap()
++            .revoked_at
++            .is_some()
++    );
++    // an unknown device
++    let (status, _) = fixture
++        .call(
++            Some(&member.cookie),
++            "DELETE",
++            &format!("/{}", Id::new_v7()),
++            None,
++        )
++        .await;
++    assert_eq!(status, StatusCode::NOT_FOUND);
++}
++
++#[tokio::test]
++async fn the_feature_is_off_without_a_registry_or_with_mail_off() {
++    for fixture in [
++        Fixture::with(false, true).await,
++        Fixture::with(true, false).await,
++    ] {
++        let cookie = fixture.owner.cookie.clone();
++        let (status, _) = fixture.enroll(&fixture.owner, "Laptop").await;
++        assert_eq!(status, StatusCode::NOT_FOUND);
++        let (status, _) = fixture.call(Some(&cookie), "GET", "", None).await;
++        assert_eq!(status, StatusCode::NOT_FOUND);
++        let (status, _) = fixture
++            .call(Some(&cookie), "DELETE", &format!("/{}", Id::new_v7()), None)
++            .await;
++        assert_eq!(status, StatusCode::NOT_FOUND);
++        assert!(!fixture.registry_path.exists());
++        assert_eq!(
++            fixture
++                .count("SELECT COUNT(*) FROM mail_domains WHERE name LIKE '%.bridge.invalid'")
++                .await,
++            0
++        );
++    }
++}
++
++#[tokio::test]
++async fn enrollment_refuses_bad_callers_and_bad_keys() {
++    let fixture = Fixture::new().await;
++    let (status, _) = fixture
++        .call(
++            None,
++            "POST",
++            "",
++            Some(json!({ "name": "x", "public_key": PUBLIC_KEY })),
++        )
++        .await;
++    assert_eq!(status, StatusCode::UNAUTHORIZED);
++
++    let guest = fixture.user("guest").await;
++    let (status, _) = fixture.enroll(&guest, "Laptop").await;
++    assert_eq!(status, StatusCode::NOT_FOUND);
++
++    for key in [
++        "",
++        "not base64!",
++        // base64 of 91 zero bytes: not a key
++        &"AAAA".repeat(30),
++    ] {
++        let (status, _) = fixture
++            .call(
++                Some(&fixture.owner.cookie),
++                "POST",
++                "",
++                Some(json!({ "name": "Laptop", "public_key": key })),
++            )
++            .await;
++        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "key {key:?}");
++    }
++    let (status, _) = fixture
++        .call(
++            Some(&fixture.owner.cookie),
++            "POST",
++            "",
++            Some(json!({ "name": "  ", "public_key": PUBLIC_KEY })),
++        )
++        .await;
++    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
++    assert!(!fixture.registry_path.exists());
++}
++
++#[tokio::test]
++async fn registry_writes_are_atomic_and_leave_no_temporary_files() {
++    let fixture = Fixture::new().await;
++    fixture.enroll(&fixture.owner, "One").await;
++    fixture.enroll(&fixture.owner, "Two").await;
++    let text = std::fs::read_to_string(&fixture.registry_path).unwrap();
++    let file: Value = serde_json::from_str(&text).unwrap();
++    assert_eq!(file["devices"].as_array().unwrap().len(), 2);
++    let names: Vec<_> = std::fs::read_dir(fixture.registry_path.parent().unwrap())
++        .unwrap()
++        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
++        .collect();
++    assert_eq!(names, vec!["devices.json".to_owned()]);
++    // a registry replaced behind the server's back is read again
++    std::fs::write(&fixture.registry_path, r#"{"version":1,"devices":[]}"#).unwrap();
++    let (_, list) = fixture
++        .call(Some(&fixture.owner.cookie), "GET", "", None)
++        .await;
++    assert_eq!(list, json!([]));
++}
++
++#[tokio::test]
++async fn the_dns_check_leaves_the_invalid_domain_verified() {
++    let fixture = Fixture::new().await;
++    fixture.enroll(&fixture.owner, "Laptop").await;
++    let domain_id: String =
++        sqlx::query_scalar("SELECT id FROM mail_domains WHERE name LIKE '%.bridge.invalid'")
++            .fetch_one(fixture.database.pool())
++            .await
++            .unwrap();
++    // an empty resolver: a real domain would lose its verify record and be suspended
++    let checker = DnsChecker::new(
++        Arc::clone(&fixture.mail),
++        Arc::new(FakeDns::new()),
++        None,
++        MailMode::Direct,
++    );
++    let day = 25 * 60 * 60 * 1000;
++    let now = TimestampMillis::from_millis(TimestampMillis::now().as_millis() + day);
++    let status = checker
++        .check_domain(domain_id.parse().unwrap(), now)
++        .await
++        .unwrap();
++    assert_eq!(status, Some(DomainStatus::Verified));
++    checker.check_due(now).await.unwrap();
++    let (status, suspended_at): (String, Option<i64>) =
++        sqlx::query_as("SELECT status, suspended_at FROM mail_domains WHERE id = $1")
++            .bind(&domain_id)
++            .fetch_one(fixture.database.pool())
++            .await
++            .unwrap();
++    assert_eq!(status, "verified");
++    assert_eq!(suspended_at, None);
++}
+diff --git a/apps/server/tests/openapi_contract.rs b/apps/server/tests/openapi_contract.rs
+index f4ecee2d..37ecd93e 100644
+--- a/apps/server/tests/openapi_contract.rs
++++ b/apps/server/tests/openapi_contract.rs
+@@ -27,7 +27,7 @@ fn openapi_generation_is_byte_stable_and_covers_public_routes() {
+ 
+     let document: serde_json::Value = serde_json::from_str(&first).unwrap();
+     assert_eq!(document["info"]["version"], CONTRACT_ID);
+-    assert_eq!(document["paths"].as_object().unwrap().len(), 370);
++    assert_eq!(document["paths"].as_object().unwrap().len(), 372);
+     let operation_count: usize = document["paths"]
+         .as_object()
+         .unwrap()
+@@ -42,7 +42,7 @@ fn openapi_generation_is_byte_stable_and_covers_public_routes() {
+                 .count()
+         })
+         .sum();
+-    assert_eq!(operation_count, 479);
++    assert_eq!(operation_count, 482);
+     for path in [
+         "/api/v1/setup/status",
+         "/api/v1/auth/me",
+diff --git a/crates/platform/src/config.rs b/crates/platform/src/config.rs
+index 304dca75..8f291ab2 100644
+--- a/crates/platform/src/config.rs
++++ b/crates/platform/src/config.rs
+@@ -53,6 +53,7 @@ const MAIL_TLS_KEY_ENV: &str = "ORBIT_MAIL_TLS_KEY";
+ const MAIL_MAX_MESSAGE_BYTES_ENV: &str = "ORBIT_MAIL_MAX_MESSAGE_BYTES";
+ const MAIL_DNS_RESOLVER_ENV: &str = "ORBIT_MAIL_DNS_RESOLVER";
+ const MAIL_CONTENT_ORIGIN_ENV: &str = "ORBIT_MAIL_CONTENT_ORIGIN";
++const MAIL_BRIDGE_REGISTRY_PATH_ENV: &str = "ORBIT_MAIL_BRIDGE_REGISTRY_PATH";
+ /// The default Docker bridge gateway: every container on the bridge seems to connect from it.
+ const DOCKER_GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(172, 17, 0, 1));
+ const CLOUD_ENV: &str = "ORBIT_CLOUD";
+@@ -332,6 +333,8 @@ pub struct MailConfig {
+     pub dns_resolver: Option<SocketAddr>,
+     /// A separate origin for HTML views and attachments.
+     pub content_origin: Option<String>,
++    /// The Worbit bridge device registry file. Not set: the bridge is off.
++    pub bridge_registry_path: Option<PathBuf>,
+ }
+ 
+ impl Default for MailConfig {
+@@ -350,6 +353,7 @@ impl Default for MailConfig {
+             max_message_bytes: 50 * 1024 * 1024,
+             dns_resolver: None,
+             content_origin: None,
++            bridge_registry_path: None,
+         }
+     }
+ }
+@@ -1228,6 +1232,8 @@ fn apply_environment(
+             config.mail.dns_resolver = Some(parse_environment(key, value)?);
+         } else if key == MAIL_CONTENT_ORIGIN_ENV {
+             config.mail.content_origin = Some(value.clone());
++        } else if key == MAIL_BRIDGE_REGISTRY_PATH_ENV {
++            config.mail.bridge_registry_path = Some(PathBuf::from(value));
+         } else if key == APP_KEY_ENV {
+             config.app_key = Some(parse_app_key(value)?);
+         } else if key == APP_KEY_FILE_ENV {
+diff --git a/crates/platform/tests/config.rs b/crates/platform/tests/config.rs
+index b565afe6..ac2db185 100644
+--- a/crates/platform/tests/config.rs
++++ b/crates/platform/tests/config.rs
+@@ -683,6 +683,7 @@ fn mail_relay_settings_are_read() {
+         ("ORBIT_MAIL_MAX_MESSAGE_BYTES", "1048576"),
+         ("ORBIT_MAIL_DNS_RESOLVER", "1.1.1.1:53"),
+         ("ORBIT_MAIL_CONTENT_ORIGIN", "http://127.0.0.2:8080"),
++        ("ORBIT_MAIL_BRIDGE_REGISTRY_PATH", "bridge/devices.json"),
+     ])
+     .unwrap()
+     .mail;
+@@ -695,6 +696,10 @@ fn mail_relay_settings_are_read() {
+     assert_eq!(mail.smtp_port, 2526);
+     assert_eq!(mail.max_message_bytes, 1_048_576);
+     assert_eq!(mail.dns_resolver.unwrap().to_string(), "1.1.1.1:53");
++    assert_eq!(
++        mail.bridge_registry_path,
++        Some(std::path::PathBuf::from("bridge/devices.json"))
++    );
+     assert_eq!(
+         mail.content_origin.as_deref(),
+         Some("http://127.0.0.2:8080")
+-- 
+2.56.0.windows.4
+

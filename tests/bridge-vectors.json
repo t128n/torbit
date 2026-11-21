@@ -1,0 +1,241 @@
+{
+  "format": "worbit-bridge-v1",
+  "note": "TEST VECTORS. The private key is a throwaway and must never be used outside tests.",
+  "algorithm": "ECDSA P-256 / SHA-256, signature IEEE-P1363 r||s (64 bytes), standard base64 with padding",
+  "now_unix": 1790000000,
+  "window_seconds": 300,
+  "device_id": "7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+  "public_key_spki_base64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEVWdz1M4dMUeIDjHe5q2Bldyuj+17hs/6Uzy0Yh472OokRcmePszhH703VTFrmEhLqMst+TROwubj/+ZKLmwl1Q==",
+  "private_key_pkcs8_base64": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgPEedIUJYKT4wK9rQ3XFIo6pc8EmClc3Sz2FtAEKiYXqhRANCAARVZ3PUzh0xR4gOMd7mrYGV3K6P7XuGz/pTPLRiHjvY6iRFyZ4+zOEfvTdVMWuYSEuoyy35NE7C5uP/5koubCXV",
+  "stateful_cases_not_in_vectors": [
+    "unknown device (404)",
+    "revoked device (401)",
+    "repeated nonce (401)",
+    "body over 2 MiB (413)",
+    "feature off (404)",
+    "storage/quota/db failure (503)"
+  ],
+  "vectors": [
+    {
+      "name": "valid-simple",
+      "description": "Plain ASCII MIME body.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000000",
+        "X-Worbit-Nonce": "AAECAwQFBgcICQoLDA0ODw",
+        "X-Worbit-Signature": "q+lT5OICzz2X5spzZPcbZ945w3GK9eG23I+JQjcViE8AWs3T6m/C1HORtkydft2T6Sgi57KUM3S9R50xB9mjDg=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlLg0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000000\nAAECAwQFBgcICQoLDA0ODw\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": true,
+        "timestamp_in_window": true,
+        "status": 200
+      }
+    },
+    {
+      "name": "valid-empty-body",
+      "description": "Empty body hashes to the SHA-256 of zero bytes.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000000",
+        "X-Worbit-Nonce": "n-empty_0001",
+        "X-Worbit-Signature": "LY5qEFMVPTiKe72Q5c4NListDNyVA6c2X61tMBxJWpCHTUtlXeUJu+zG45Uf6wacGOXrUCniVwDCzYFghrIQrw=="
+      },
+      "body_base64": "",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000000\nn-empty_0001\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expect": {
+        "signature_valid": true,
+        "timestamp_in_window": true,
+        "status": 200
+      }
+    },
+    {
+      "name": "valid-utf8",
+      "description": "UTF-8 body with non-ASCII bytes.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000000",
+        "X-Worbit-Nonce": "n-utf8_0002",
+        "X-Worbit-Signature": "/6rVlN6yAwzga9NQhk+Xv2Tg6yOEqGmg+6CEQ+yMHxKdeWzCdPEuOje148Wv7jqev8C/JK50O8LlizofqGtTgg=="
+      },
+      "body_base64": "U3ViamVjdDogPT9VVEYtOD9CP3c1eHRiR0YxZEE9PT89DQpDb250ZW50LVR5cGU6IHRleHQvcGxhaW47IGNoYXJzZXQ9dXRmLTgNCg0KR3LDvMOfZSDinJMNCg==",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000000\nn-utf8_0002\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\n52c34f0bb81dc55fdd179307d208211054aa2707dba4ff258b25ce281e5ab72f",
+      "expect": {
+        "signature_valid": true,
+        "timestamp_in_window": true,
+        "status": 200
+      }
+    },
+    {
+      "name": "valid-binary",
+      "description": "Body with all 256 byte values.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000000",
+        "X-Worbit-Nonce": "n-binary_0003",
+        "X-Worbit-Signature": "U5suQC4njnGd/3uAJPbhztSZSWuf5XieMUGWyDZD+svbtXJXDi9+tEaZ0ss+U2uH9fU4mV/TAohm7B51vabKPg=="
+      },
+      "body_base64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000000\nn-binary_0003\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\n40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880",
+      "expect": {
+        "signature_valid": true,
+        "timestamp_in_window": true,
+        "status": 200
+      }
+    },
+    {
+      "name": "valid-window-edge-past",
+      "description": "Timestamp exactly 300 s before server time is accepted.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1789999700",
+        "X-Worbit-Nonce": "n-edge-past",
+        "X-Worbit-Signature": "5SaFOAPjSjXq3rYEBRB/QHrZC98mt6/Nlf9NsjXhjyXdpLm62qS/W57LedY3A3iwYoDzq0geXDucJ+uC7XDiqg=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlLg0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1789999700\nn-edge-past\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": true,
+        "timestamp_in_window": true,
+        "status": 200
+      }
+    },
+    {
+      "name": "valid-window-edge-future",
+      "description": "Timestamp exactly 300 s after server time is accepted.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000300",
+        "X-Worbit-Nonce": "n-edge-future",
+        "X-Worbit-Signature": "XAYyjnKL1q+2P86V7aW1ot6nag95pasNxqnu0m9+noLlNZSXXW4TKXhM4RH6HjA1xulEfqFhA4g+A5Qi9MF70Q=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlLg0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000300\nn-edge-future\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": true,
+        "timestamp_in_window": true,
+        "status": 200
+      }
+    },
+    {
+      "name": "invalid-tampered-body",
+      "description": "Body changed after signing.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000000",
+        "X-Worbit-Nonce": "n-tamper-0004",
+        "X-Worbit-Signature": "hQqA/lNNM2d3/lvUAcSEvZtA/+b9Mmyoxbp7GDJfUGHkEZj4dWwhPhV+VEdpQUS+6CkKVvmKgUCwd76PwJh21w=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlIQ0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000000\nn-tamper-0004\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": false,
+        "timestamp_in_window": true,
+        "status": 401
+      }
+    },
+    {
+      "name": "invalid-wrong-device-id",
+      "description": "Signed for one device id, delivered to the path of another. Verified with the key registered for the path device.",
+      "path": "/api/v1/mail/inbound/bridge/0f9e8d7c-6b5a-4c3d-9e2f-1a0b9c8d7e6f",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000000",
+        "X-Worbit-Nonce": "n-wrongdev-05",
+        "X-Worbit-Signature": "O7oIBcTbTlw/oxAJ6Q5mhiRWCi+OYVqsV39gF1rnEyZGPDfVjw4gjzux82xlNeQ3SXU+0EaUSAjRobaa2MT5hg=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlLg0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000000\nn-wrongdev-05\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": false,
+        "timestamp_in_window": true,
+        "status": 401
+      }
+    },
+    {
+      "name": "invalid-wrong-timestamp",
+      "description": "Timestamp header changed after signing (still inside the window).",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000001",
+        "X-Worbit-Nonce": "n-wrongts-006",
+        "X-Worbit-Signature": "fs4DsZqfJosbzLgZAsPtOIWA/DZNR6H+GKFyFnLhbXEdX0p1AN5jMnE2mVXl314edLt9cFpB0tzMac5ovaWYlQ=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlLg0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000000\nn-wrongts-006\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": false,
+        "timestamp_in_window": true,
+        "status": 401
+      }
+    },
+    {
+      "name": "invalid-wrong-nonce",
+      "description": "Nonce header differs from the nonce that was signed.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000000",
+        "X-Worbit-Nonce": "n-wrongnonce7",
+        "X-Worbit-Signature": "Sn1QbwhEI6wRQxZEJBKm0DCj1s6aU89RXJz/exf5apYZBq4vENWT+sMrkPdJaXzKhi471GX8P5zJWkWvIPjlDQ=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlLg0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000000\nn-wrongnonce7\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": false,
+        "timestamp_in_window": true,
+        "status": 401
+      }
+    },
+    {
+      "name": "invalid-signature-garbage",
+      "description": "Well-formed 64-byte signature that was never produced by the key.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000000",
+        "X-Worbit-Nonce": "n-garbage-008",
+        "X-Worbit-Signature": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlLg0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000000\nn-garbage-008\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": false,
+        "timestamp_in_window": true,
+        "status": 401
+      }
+    },
+    {
+      "name": "invalid-expired",
+      "description": "Correctly signed, but 301 s in the past.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1789999699",
+        "X-Worbit-Nonce": "n-expired-009",
+        "X-Worbit-Signature": "11+UKQcVHfd8cwR+ZONTzrBiqWS7aC5A037IlMGE0CxzQi3g7hKIc/j4DbfqoMXgE1kiQjIBbAmAPCMZujEBLQ=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlLg0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1789999699\nn-expired-009\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": true,
+        "timestamp_in_window": false,
+        "status": 401
+      }
+    },
+    {
+      "name": "invalid-future",
+      "description": "Correctly signed, but 301 s in the future.",
+      "path": "/api/v1/mail/inbound/bridge/7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "headers": {
+        "X-Worbit-Timestamp": "1790000301",
+        "X-Worbit-Nonce": "n-future-0010",
+        "X-Worbit-Signature": "aR1ji90S8dtYv15F5Z0N520Ha9/dz0bgoqlLGxVqxcDz0LUsRjFnJe7vNViixXD3e1eFXEY/VSYRDvyFLBf26w=="
+      },
+      "body_base64": "RnJvbTogYUBleGFtcGxlLmNvbQ0KVG86IGJAZXhhbXBsZS5pbnZhbGlkDQpTdWJqZWN0OiBIZWxsbw0KTWVzc2FnZS1JRDogPDFAZXhhbXBsZS5jb20+DQoNCkhpIHRoZXJlLg0K",
+      "signed_string_of_original": "worbit-bridge-v1\n1790000301\nn-future-0010\n7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d\nca8937c296923988645eb7132a9a2d85b3e5828abaf48e8793a3682c159041a8",
+      "expect": {
+        "signature_valid": true,
+        "timestamp_in_window": false,
+        "status": 401
+      }
+    }
+  ]
+}

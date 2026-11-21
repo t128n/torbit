@@ -99,7 +99,13 @@ function New-FakeItem($Overrides) {
 function New-FakeAdapter($Items) {
     $a = New-Object psobject
     $a | Add-Member -MemberType NoteProperty -Name Items -Value $Items
-    $a | Add-Member -MemberType ScriptMethod -Name GetInboxItems -Value { param([DateTime]$Since) , $this.Items }
+    # Like Outlook: only the Inbox folder, only items received at or after $Since, oldest first. Items without a
+    # Folder property are in the Inbox. Tests mutate .Items to model deleted and moved mail.
+    $a | Add-Member -MemberType ScriptMethod -Name GetInboxItems -Value {
+        param([DateTime]$Since)
+        $r = @($this.Items | Where-Object { (-not ($_.PSObject.Properties['Folder']) -or $_.Folder -eq 'Inbox') -and $_.ReceivedTime -ge $Since } | Sort-Object ReceivedTime)
+        , $r
+    }
     return $a
 }
 
@@ -238,7 +244,7 @@ Test-Case 'fake Inbox items are delivered as signed, parseable messages' {
         (New-FakeItem @{ EntryId = 'A' }),
         (New-FakeItem @{ EntryId = 'B'; Subject = 'Second'; HtmlBody = '<i>hi</i>' }))
     $adapter = New-FakeAdapter $items
-    foreach ($it in $adapter.GetInboxItems([DateTime]::UtcNow.AddDays(-1))) {
+    foreach ($it in $adapter.GetInboxItems([DateTime]'2026-01-01')) {
         $r = Send-BridgeItem -Config $config -Signer $vectorSigner -Item $it
         Assert-Equal $r.Outcome 'Delivered' 'outcome'
     }
@@ -347,6 +353,294 @@ Test-Case 'blocked COM access becomes a plain-language message without hex codes
     }
     try { throw (New-Object Runtime.InteropServices.COMException('Invalid class string', -2147221164)) } catch { $msg = Get-OutlookErrorMessage $_ }
     Assert-True ($msg -like '*not installed*') 'not installed message'
+}
+
+# ---- run loop, sweep, backfill (fake Outlook, fake transport)
+
+function New-RunHome { $h = Join-Path ([IO.Path]::GetTempPath()) ('worbit-bridge-run-' + [guid]::NewGuid()); $env:WORBIT_BRIDGE_HOME = $h; Write-BridgeConfig $runConfig; return $h }
+function Remove-RunHome([string]$h) { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue; Remove-Item Env:WORBIT_BRIDGE_HOME -ErrorAction SilentlyContinue }
+function Get-RecvTime([string]$Iso) { [DateTime]::SpecifyKind([DateTime]$Iso, 'Utc') }
+$runConfig = [pscustomobject]@{ server = 'https://orbit.example.com'; workspace_id = 'ws1'; device_id = $doc.device_id; address = 'x@y.bridge.invalid'
+    device_name = 'T'; key_name = 'k'; key_provider = 'p'; enrolled_at = '2026-01-01T00:00:00.0000000Z' }
+$noSleep = { param($s) $script:sleeps += , $s }
+
+Test-Case 'run delivers new inbox mail once, across sweeps and restarts' {
+    $h = New-RunHome
+    try {
+        $script:seen = @(); $script:sleeps = @()
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; @{ Status = 200; Body = '' } }
+        $adapter = New-FakeAdapter @((New-FakeItem @{ EntryId = 'A'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }),
+            (New-FakeItem @{ EntryId = 'B'; ReceivedTime = (Get-RecvTime '2026-03-01T11:00:00') }))
+        $r1 = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r1.Delivered 2 'first sweep delivers both'
+        $r2 = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r2.Delivered 0 'second sweep delivers nothing'
+        Import-Module $modulePath -Force   # restart: all in-memory state is gone
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; @{ Status = 200; Body = '' } }
+        $adapter.Items += (New-FakeItem @{ EntryId = 'C'; ReceivedTime = (Get-RecvTime '2026-03-02T09:00:00') })
+        $r3 = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r3.Delivered 1 'only the new item after restart'
+        Assert-Equal $script:seen.Count 3 'three requests in total, no duplicates'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'sweep re-reads by received time but never sends an item twice (cursor overlap)' {
+    $h = New-RunHome
+    try {
+        $script:seen = @()
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; @{ Status = 200; Body = '' } }
+        $adapter = New-FakeAdapter @((New-FakeItem @{ EntryId = 'A'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }))
+        [void](Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep)
+        # a late-arriving item with an older received time than A (clock skew) is still picked up
+        $adapter.Items += (New-FakeItem @{ EntryId = 'LATE'; ReceivedTime = (Get-RecvTime '2026-03-01T09:58:00') })
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Delivered 1 'late item delivered'
+        Assert-Equal $script:seen.Count 2 'A not repeated'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case '503 is retried with growing backoff, then delivered' {
+    $h = New-RunHome
+    try {
+        $script:seen = @(); $script:sleeps = @(); $script:codes = @(503, 503, 200)
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; $c = $script:codes[$script:seen.Count - 1]; @{ Status = $c; Body = '' } }
+        $adapter = New-FakeAdapter @((New-FakeItem @{ EntryId = 'A'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }))
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Delivered 1 'delivered after retries'
+        Assert-Equal $script:seen.Count 3 'three attempts'
+        Assert-Equal $script:sleeps.Count 2 'two waits'
+        Assert-True ($script:sleeps[1] -gt $script:sleeps[0]) 'backoff grows'
+        Assert-Equal (Get-BridgeStatus).Pending 0 'nothing pending'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'Orbit down: items stay pending, later sweep delivers each once' {
+    $h = New-RunHome
+    try {
+        $script:seen = @(); $script:sleeps = @(); $script:up = $false
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; if ($script:up) { @{ Status = 200; Body = '' } } else { @{ Status = 0; Body = '' } } }
+        $adapter = New-FakeAdapter @((New-FakeItem @{ EntryId = 'A'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }),
+            (New-FakeItem @{ EntryId = 'B'; ReceivedTime = (Get-RecvTime '2026-03-01T11:00:00') }))
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Delivered 0 'nothing delivered'
+        Assert-Equal $r.Pending 2 'both pending'
+        Assert-True ($script:seen.Count -le 4) 'gives up after a few attempts, does not hammer'
+        Assert-Equal (Get-BridgeStatus).Pending 2 'status shows pending'
+        $script:up = $true; $script:seen = @()
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Delivered 2 'delivered when Orbit is back'
+        Assert-Equal $script:seen.Count 2 'each once'
+        Assert-Equal (Get-BridgeStatus).Pending 0 'pending cleared'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case '401 and 413 are recorded and skipped, never retried or resent' {
+    $h = New-RunHome
+    try {
+        $script:seen = @(); $script:sleeps = @()
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r
+            $n = [Text.Encoding]::ASCII.GetString($r.Body)
+            if ($n -match 'Subject: DENIED') { @{ Status = 401; Body = '' } } elseif ($n -match 'Subject: HUGE') { @{ Status = 413; Body = '' } } else { @{ Status = 200; Body = '' } } }
+        $adapter = New-FakeAdapter @(
+            (New-FakeItem @{ EntryId = 'A'; Subject = 'DENIED'; TransportHeaders = ''; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }),
+            (New-FakeItem @{ EntryId = 'B'; Subject = 'HUGE'; TransportHeaders = ''; ReceivedTime = (Get-RecvTime '2026-03-01T11:00:00') }),
+            (New-FakeItem @{ EntryId = 'C'; Subject = 'fine'; TransportHeaders = ''; ReceivedTime = (Get-RecvTime '2026-03-01T12:00:00') }))
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Delivered 1 'C delivered'
+        Assert-Equal $r.Skipped 2 'A and B skipped'
+        Assert-Equal $script:sleeps.Count 0 'no retry waits'
+        Assert-Equal $script:seen.Count 3 'one request each'
+        $state = Read-BridgeState
+        Assert-Equal $state.items.A.outcome 'skipped' 'A recorded as skipped'
+        Assert-Equal $state.items.A.status 401 'A status'
+        Assert-Equal $state.items.B.status 413 'B status'
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $script:seen.Count 3 'nothing resent on the next sweep'
+        Assert-Equal (Get-BridgeStatus).Skipped 2 'status counts skipped'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'a message over 2 MiB is recorded as skipped (413) without a request' {
+    $h = New-RunHome
+    try {
+        $script:seen = @()
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; @{ Status = 200; Body = '' } }
+        $big = [pscustomobject]@{ FileName = 'big.bin'; MimeType = 'application/octet-stream'; ContentId = ''; IsInline = $false; Bytes = (New-Object byte[] 2000000) }
+        $adapter = New-FakeAdapter @((New-FakeItem @{ EntryId = 'BIG'; Attachments = @($big); ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }))
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Skipped 1 'skipped'
+        Assert-Equal $script:seen.Count 0 'no request'
+        Assert-Equal (Read-BridgeState).items.BIG.status 413 'recorded 413'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'backfill honors the start date and skips what was already delivered' {
+    $h = New-RunHome
+    try {
+        $script:seen = @()
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; @{ Status = 200; Body = '' } }
+        $adapter = New-FakeAdapter @(
+            (New-FakeItem @{ EntryId = 'JAN'; ReceivedTime = (Get-RecvTime '2026-01-15T10:00:00') }),
+            (New-FakeItem @{ EntryId = 'MAR'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }),
+            (New-FakeItem @{ EntryId = 'JUN'; ReceivedTime = (Get-RecvTime '2026-06-01T10:00:00') }))
+        $r = Invoke-BridgeBackfill -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Since (Get-RecvTime '2026-02-01T00:00:00') -Sleep $noSleep
+        Assert-Equal $r.Delivered 2 'MAR and JUN only'
+        Assert-Equal $script:seen.Count 2 'two requests'
+        $r = Invoke-BridgeBackfill -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Since (Get-RecvTime '2026-01-01T00:00:00') -Sleep $noSleep
+        Assert-Equal $r.Delivered 1 'only JAN is new'
+        Assert-Equal $script:seen.Count 3 'MAR and JUN not resent'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'only the Inbox is read: other folders are never delivered' {
+    $h = New-RunHome
+    try {
+        $script:seen = @()
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; @{ Status = 200; Body = '' } }
+        $adapter = New-FakeAdapter @(
+            (New-FakeItem @{ EntryId = 'IN'; Folder = 'Inbox'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }),
+            (New-FakeItem @{ EntryId = 'SENT'; Folder = 'Sent Items'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }),
+            (New-FakeItem @{ EntryId = 'JUNK'; Folder = 'Junk Email'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }),
+            (New-FakeItem @{ EntryId = 'SUB'; Folder = 'Inbox/Projects'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }))
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Delivered 1 'inbox only'
+        Assert-Equal $script:seen.Count 1 'one request'
+        $r = Invoke-BridgeBackfill -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Since (Get-RecvTime '2026-01-01T00:00:00') -Sleep $noSleep
+        Assert-Equal $r.Delivered 0 'backfill is inbox only too'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'deleted and moved items are not propagated and not resent' {
+    $h = New-RunHome
+    try {
+        $script:seen = @()
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; @{ Status = 200; Body = '' } }
+        $a = New-FakeItem @{ EntryId = 'A'; Folder = 'Inbox'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }
+        $b = New-FakeItem @{ EntryId = 'B'; Folder = 'Inbox'; ReceivedTime = (Get-RecvTime '2026-03-01T11:00:00') }
+        $adapter = New-FakeAdapter @($a, $b)
+        [void](Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep)
+        Assert-Equal $script:seen.Count 2 'both delivered first'
+        $adapter.Items = @($b); $b.Folder = 'Deleted Items'      # A deleted, B moved to Deleted Items
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Delivered 0 'nothing new'
+        $b.Folder = 'Inbox'                                       # moved back: still delivered only once
+        $r = Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep
+        Assert-Equal $r.Delivered 0 'moved back, still not resent'
+        Assert-Equal $script:seen.Count 2 'no further requests of any kind'
+        foreach ($req in $script:seen) { Assert-Equal $req.Method 'POST' 'only deliveries, never deletes' }
+        Assert-Equal (Read-BridgeState).items.A.outcome 'delivered' 'history kept'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'run loop sweeps on an interval, survives an Outlook error, logs no bodies' {
+    $h = New-RunHome
+    try {
+        $script:seen = @(); $script:sleeps = @()
+        Set-BridgeHttpTransport { param($r) $script:seen += , $r; @{ Status = 200; Body = '' } }
+        $adapter = New-FakeAdapter @((New-FakeItem @{ EntryId = 'A'; Body = 'SECRET-LOOP-MARKER'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }))
+        $adapter | Add-Member -MemberType NoteProperty -Name Calls -Value 0
+        $adapter | Add-Member -MemberType ScriptMethod -Name GetInboxItems -Force -Value {
+            param([DateTime]$Since)
+            $this.Calls++
+            if ($this.Calls -eq 1) { throw 'Outlook is not running' }
+            , @($this.Items)
+        }
+        Invoke-BridgeRun -Config $runConfig -Signer $vectorSigner -Adapter $adapter -IntervalSeconds 300 -MaxIterations 3 -Sleep $noSleep
+        Assert-Equal $adapter.Calls 3 'three sweeps'
+        Assert-Equal $script:seen.Count 1 'delivered once'
+        Assert-Equal $script:sleeps.Count 2 'waited between sweeps'
+        Assert-Equal $script:sleeps[0] 300 'interval'
+        $log = Get-Content -Raw (Join-Path $h 'bridge.log')
+        Assert-True ($log -notmatch 'SECRET-LOOP-MARKER') 'no body in log'
+        Assert-True ($log -match 'Outlook is not running') 'error logged'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'status reports device, key location and counters' {
+    $h = New-RunHome
+    try {
+        Write-BridgeConfig $runConfig
+        Set-BridgeHttpTransport { param($r) @{ Status = 200; Body = '' } }
+        $adapter = New-FakeAdapter @((New-FakeItem @{ EntryId = 'A'; ReceivedTime = (Get-RecvTime '2026-03-01T10:00:00') }))
+        [void](Invoke-BridgeRunOnce -Config $runConfig -Signer $vectorSigner -Adapter $adapter -Sleep $noSleep)
+        $s = Get-BridgeStatus
+        Assert-Equal $s.Enrolled $true 'enrolled'
+        Assert-Equal $s.DeviceId $doc.device_id 'device'
+        Assert-Equal $s.Server 'https://orbit.example.com' 'server'
+        Assert-Equal $s.KeyProvider 'p' 'key location'
+        Assert-Equal $s.Delivered 1 'delivered'
+        Assert-True ($null -ne $s.LastRun) 'last run'
+    } finally { Remove-RunHome $h }
+    $h = New-RunHome
+    try { Remove-Item (Get-BridgeConfigPath); Assert-Equal (Get-BridgeStatus).Enrolled $false 'not enrolled' } finally { Remove-RunHome $h }
+}
+
+# ---- revoke
+
+Test-Case 'revoke calls the server, deletes the key, config and state' {
+    $h = New-RunHome
+    try {
+        $prov = 'Microsoft Software Key Storage Provider'
+        $keyName = 'Worbit-Bridge-test-' + [guid]::NewGuid().ToString('N')
+        [void](New-BridgeKey -Name $keyName -Provider $prov)
+        $cfg = $runConfig.PSObject.Copy(); $cfg.key_name = $keyName; $cfg.key_provider = $prov
+        Write-BridgeConfig $cfg; Write-BridgeState @{ version = 1; items = @{} }
+        $script:req = $null
+        Set-BridgeHttpTransport { param($r) $script:req = $r; @{ Status = 204; Body = '' } }
+        Invoke-BridgeRevoke -Credential 'TOKEN-REV' -CredentialKind session
+        Assert-Equal $script:req.Method 'DELETE' 'method'
+        Assert-Equal $script:req.Url ('https://orbit.example.com/api/v1/workspaces/ws1/mail/bridge/devices/' + $doc.device_id) 'url'
+        Assert-Equal $script:req.Headers.Cookie '__Host-orbit_session=TOKEN-REV' 'cookie'
+        Assert-Equal $script:req.Headers.Origin 'https://orbit.example.com' 'origin'
+        Assert-True (-not (Read-BridgeConfig)) 'config removed'
+        Assert-True (-not (Read-BridgeState)) 'state removed'
+        $gone = $false
+        try { $k = Open-BridgeKey $keyName $prov; $k.Dispose() } catch { $gone = $true }
+        Assert-True $gone 'key deleted'
+        $log = Get-Content -Raw (Join-Path $h 'bridge.log')
+        Assert-True ($log -notmatch 'TOKEN-REV') 'credential not logged'
+    } finally { Remove-RunHome $h }
+}
+
+Test-Case 'failed revoke keeps everything; -LocalOnly removes local data without a request' {
+    $h = New-RunHome
+    $prov = 'Microsoft Software Key Storage Provider'
+    $keyName = 'Worbit-Bridge-test-' + [guid]::NewGuid().ToString('N')
+    try {
+        [void](New-BridgeKey -Name $keyName -Provider $prov)
+        $cfg = $runConfig.PSObject.Copy(); $cfg.key_name = $keyName; $cfg.key_provider = $prov
+        Write-BridgeConfig $cfg
+        Set-BridgeHttpTransport { param($r) @{ Status = 401; Body = '' } }
+        $msg = ''
+        try { Invoke-BridgeRevoke -Credential 'bad' -CredentialKind session } catch { $msg = $_.Exception.Message }
+        Assert-True ($msg -like '*did not accept the credential*') "message: $msg"
+        Assert-True ([bool](Read-BridgeConfig)) 'config kept'
+        $k = Open-BridgeKey $keyName $prov; $k.Dispose()
+        $script:req = $null
+        Set-BridgeHttpTransport { param($r) $script:req = $r; @{ Status = 204; Body = '' } }
+        Invoke-BridgeRevoke -LocalOnly
+        Assert-True ($null -eq $script:req) 'no request'
+        Assert-True (-not (Read-BridgeConfig)) 'config removed'
+    } finally { Remove-RunHome $h; Remove-BridgeKey $keyName $prov }
+}
+
+# ---- autostart
+
+Test-Case 'autostart registers a logon task for the current user in the interactive session, and removes it' {
+    $taskName = 'WorbitBridge-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    try {
+        Install-BridgeAutostart -TaskName $taskName -ScriptPath 'C:\Bridge\bridge.ps1'
+        $t = Get-ScheduledTask -TaskName $taskName
+        Assert-Equal @($t.Triggers).Count 1 'one trigger'
+        Assert-True ($t.Triggers[0].CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger') 'logon trigger'
+        Assert-Equal $t.Principal.LogonType 'Interactive' 'interactive session'
+        Assert-Equal $t.Principal.RunLevel 'Limited' 'not elevated'
+        Assert-True ($t.Actions[0].Arguments -like '*bridge.ps1*run*') "arguments: $($t.Actions[0].Arguments)"
+        Assert-True ($t.Actions[0].Execute -like '*powershell.exe') 'Windows PowerShell'
+        Assert-True ((Get-BridgeAutostart -TaskName $taskName).Installed) 'reported installed'
+        Remove-BridgeAutostart -TaskName $taskName
+        Assert-True (-not (Get-BridgeAutostart -TaskName $taskName).Installed) 'removed'
+    } finally { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
 }
 
 Set-BridgeHttpTransport $null

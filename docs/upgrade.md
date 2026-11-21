@@ -14,7 +14,7 @@ state you need:
 | `config\worbit.env` | renamed to `config\torbit.env` by `install.ps1` when it runs (pass `-EnvFile` to override) |
 | Database table `worbit_github_host_binding` | renamed to `torbit_github_host_binding` at the first start of the new build, in one transaction. The row, and so the immutable GitHub host binding, is kept. Safe to run again and on fresh installs |
 | Bridge (`%LOCALAPPDATA%\Worbit\Bridge`, `WORBIT_BRIDGE_HOME`, scheduled task `Worbit Bridge`) | still read when the Torbit names are not in use; `torbit-bridge install` removes the old logon task; the Go bridge reads the same config and state |
-| Bridge wire format (`worbit-bridge-v1`, `X-Worbit-*` headers) | unchanged on purpose: renaming it would break every enrolled device |
+| Bridge wire format | renamed to `torbit-bridge-v1` and `X-Torbit-*` headers, in the server patch (0006) and the bridge together. Upgrade the server and every PC's `torbit-bridge.exe` at the same time: an old bridge is rejected by the new server and the other way round. Enrollment, device ids and keys are unchanged, so nobody re-enrolls |
 | Release zip, tag | now `torbit-windows-x86_64-<version>.zip` and `torbit-v<version>`; the old GitHub URL redirects |
 
 Before you start the new build:

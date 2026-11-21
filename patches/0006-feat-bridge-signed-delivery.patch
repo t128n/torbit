@@ -23,10 +23,10 @@ index b4737000..82f26398 100644
          .map_err(|error| sqlx::Error::Decode(Box::new(error)))
  }
 +
-+// Signed delivery (`docs/bridge-signing.md` of the Torbit repository, format `worbit-bridge-v1`).
++// Signed delivery (`docs/bridge-signing.md` of the Torbit repository, format `torbit-bridge-v1`).
 +
 +/// The first line of the signed string.
-+pub const SIGNING_FORMAT: &str = "worbit-bridge-v1";
++pub const SIGNING_FORMAT: &str = "torbit-bridge-v1";
 +/// A timestamp is accepted when it is at most this many seconds from the server's clock.
 +pub const WINDOW_SECS: i64 = 300;
 +/// A `(device, nonce)` pair is remembered this long (twice the window).
@@ -297,7 +297,7 @@ index 37711961..b5f1ddcb 100644
  }
  
 +/// Delivers one message from an enrolled device (`docs/bridge-signing.md`, format
-+/// `worbit-bridge-v1`). The body is the raw MIME message. Checks, in order: the bridge is on and
++/// `torbit-bridge-v1`). The body is the raw MIME message. Checks, in order: the bridge is on and
 +/// the device exists (404), it is not revoked (401, code `device_revoked`), the headers (401), a
 +/// body slot (503) and the body (413 over the size, 408 too slow, 400 broken), the signature, the
 +/// timestamp window, the device's member and mailbox being active and the nonce (401), then
@@ -457,9 +457,9 @@ index 37711961..b5f1ddcb 100644
 +        }
 +    };
 +    SignedHeaders::parse(
-+        one("x-worbit-timestamp")?,
-+        one("x-worbit-nonce")?,
-+        one("x-worbit-signature")?,
++        one("x-torbit-timestamp")?,
++        one("x-torbit-nonce")?,
++        one("x-torbit-signature")?,
 +    )
 +}
 +
@@ -946,17 +946,17 @@ index 00000000..2156fa1a
 +    /// A request for `device` signed with the vectors' key at `timestamp`.
 +    fn signed(&self, device: &str, timestamp: i64, nonce: &str, body: &[u8]) -> BridgeRequest {
 +        let signed = format!(
-+            "worbit-bridge-v1\n{timestamp}\n{nonce}\n{device}\n{:x}",
++            "torbit-bridge-v1\n{timestamp}\n{nonce}\n{device}\n{:x}",
 +            Sha256::digest(body)
 +        );
 +        let signature: Signature = self.vectors.signing_key().sign(signed.as_bytes());
 +        BridgeRequest {
 +            path: format!("/api/v1/mail/inbound/bridge/{device}"),
 +            headers: vec![
-+                ("X-Worbit-Timestamp".to_owned(), timestamp.to_string()),
-+                ("X-Worbit-Nonce".to_owned(), nonce.to_owned()),
++                ("X-Torbit-Timestamp".to_owned(), timestamp.to_string()),
++                ("X-Torbit-Nonce".to_owned(), nonce.to_owned()),
 +                (
-+                    "X-Worbit-Signature".to_owned(),
++                    "X-Torbit-Signature".to_owned(),
 +                    STANDARD.encode(signature.to_bytes()),
 +                ),
 +            ],
@@ -1293,7 +1293,7 @@ index 00000000..2156fa1a
 +            .collect(),
 +        body: valid.body.clone(),
 +    };
-+    for name in ["X-Worbit-Timestamp", "X-Worbit-Nonce", "X-Worbit-Signature"] {
++    for name in ["X-Torbit-Timestamp", "X-Torbit-Nonce", "X-Torbit-Signature"] {
 +        assert_eq!(
 +            fixture.post(&missing(name)).await,
 +            StatusCode::UNAUTHORIZED,

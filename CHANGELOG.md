@@ -11,6 +11,10 @@
   because classic Outlook cannot be automated from session 0, and replaces the
   logon scheduled task. It keeps the same `config.json`, `state.json`, CNG key
   and wire format, so enrolled PCs need no re-enrollment.
+- **Breaking:** rename the bridge wire format from `worbit-bridge-v1` / `X-Worbit-*`
+  to `torbit-bridge-v1` / `X-Torbit-*` (patch 0006, the Go bridge, vectors and
+  docs). Upgrade the server and all bridge PCs together; deliveries from an old
+  bridge fail with 401 until it is upgraded. No re-enrollment is needed.
 - The bridge sweeps every 60 seconds instead of listening for Outlook's new-mail
   event, and follows `HTTPS_PROXY` or the manual Windows proxy (no PAC scripts).
 - Releases carry `torbit-bridge-windows-x86_64-<version>.exe` and its checksum in
@@ -31,7 +35,7 @@
   `worbit.env` to `torbit.env`, and uses `torbit.env.example` for new installs.
 - The bridge still reads `WORBIT_BRIDGE_HOME`, `%LOCALAPPDATA%\Worbit\Bridge` and the
   `Worbit Bridge` task, and replaces the task with `Torbit Bridge`. The wire format
-  (`worbit-bridge-v1`, `X-Worbit-*`) is unchanged so enrolled devices keep working.
+  (`worbit-bridge-v1`, `X-Worbit-*`) was unchanged in that release; see Unreleased.
 - Add patch 0007: a dismissible notice in the web app that torbit is an unofficial
   fork not affiliated with coollabsio, with links to upstream Orbit and this repo.
 - Keep attribution to coollabsio/orbit in README and NOTICE.

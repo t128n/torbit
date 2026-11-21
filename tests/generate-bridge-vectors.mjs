@@ -21,7 +21,7 @@ const bodies = {
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 const signedString = (ts, nonce, dev, body) =>
-  `worbit-bridge-v1\n${ts}\n${nonce}\n${dev}\n${sha(body)}`;
+  `torbit-bridge-v1\n${ts}\n${nonce}\n${dev}\n${sha(body)}`;
 const sign = (str) => {
   const s = createSign("SHA256");
   s.update(str, "utf8");
@@ -37,9 +37,9 @@ function make(name, description, { body, ts = NOW, nonce, dev = DEVICE, sigOver,
     description,
     path: path(pathDev ?? dev),
     headers: {
-      "X-Worbit-Timestamp": String(sentTs ?? ts),
-      "X-Worbit-Nonce": nonce,
-      "X-Worbit-Signature": sigOver ?? sig,
+      "X-Torbit-Timestamp": String(sentTs ?? ts),
+      "X-Torbit-Nonce": nonce,
+      "X-Torbit-Signature": sigOver ?? sig,
     },
     body_base64: wireBody.toString("base64"),
     // The string the signer signed (for the original, untampered request).
@@ -86,7 +86,7 @@ const vectors = [
 ];
 
 console.log(JSON.stringify({
-  format: "worbit-bridge-v1",
+  format: "torbit-bridge-v1",
   note: "TEST VECTORS. The private key is a throwaway and must never be used outside tests.",
   algorithm: "ECDSA P-256 / SHA-256, signature IEEE-P1363 r||s (64 bytes), standard base64 with padding",
   now_unix: NOW,

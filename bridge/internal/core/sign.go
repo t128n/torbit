@@ -10,13 +10,13 @@ import (
 	"time"
 )
 
-// SignatureFormat and the header names are the wire contract; they keep the
-// pre-rebrand "worbit" spelling on purpose so enrolled devices keep working.
+// SignatureFormat and the header names are the wire contract with the Orbit
+// server patch (patches/0006). Both sides must change together.
 const (
-	SignatureFormat = "worbit-bridge-v1"
-	HeaderTimestamp = "X-Worbit-Timestamp"
-	HeaderNonce     = "X-Worbit-Nonce"
-	HeaderSignature = "X-Worbit-Signature"
+	SignatureFormat = "torbit-bridge-v1"
+	HeaderTimestamp = "X-Torbit-Timestamp"
+	HeaderNonce     = "X-Torbit-Nonce"
+	HeaderSignature = "X-Torbit-Signature"
 	MaxBodyBytes    = 2097152
 )
 
@@ -39,7 +39,7 @@ func SignedString(timestamp, nonce, deviceID string, body []byte) string {
 	return SignatureFormat + "\n" + timestamp + "\n" + nonce + "\n" + deviceID + "\n" + sha256Hex(body)
 }
 
-// RequestHeaders returns the three X-Worbit-* headers for a body. An empty
+// RequestHeaders returns the three X-Torbit-* headers for a body. An empty
 // timestamp or nonce is generated.
 func RequestHeaders(deviceID string, body []byte, signer Signer, timestamp, nonce string) (map[string]string, error) {
 	if timestamp == "" {

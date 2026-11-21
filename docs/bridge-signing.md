@@ -1,4 +1,4 @@
-# Bridge signing format (worbit-bridge-v1)
+# Bridge signing format (torbit-bridge-v1)
 
 This is the contract between the Outlook bridge (`bridge/`, Go) and the Orbit server patch.
 Both sides must pass `tests/bridge-vectors.json`. The script side is checked by
@@ -8,9 +8,9 @@ Both sides must pass `tests/bridge-vectors.json`. The script side is checked by
 
 ```
 POST /api/v1/mail/inbound/bridge/{device_id}
-X-Worbit-Timestamp: <unix seconds>
-X-Worbit-Nonce: <nonce>
-X-Worbit-Signature: <base64 signature>
+X-Torbit-Timestamp: <unix seconds>
+X-Torbit-Nonce: <nonce>
+X-Torbit-Signature: <base64 signature>
 
 <raw MIME message bytes>
 ```
@@ -38,7 +38,7 @@ Five lines joined with a single LF (`0x0A`). There is no trailing newline and no
 The string is encoded as UTF-8 (it is pure ASCII).
 
 ```
-worbit-bridge-v1\n
+torbit-bridge-v1\n
 <timestamp>\n
 <nonce>\n
 <device_id>\n
@@ -48,7 +48,7 @@ worbit-bridge-v1\n
 Example (no spaces, `\n` is a real LF):
 
 ```
-worbit-bridge-v1
+torbit-bridge-v1
 1790000000
 AAECAwQFBgcICQoLDA0ODw
 7c1d2e3a-4b5f-4a6b-8c7d-9e0f1a2b3c4d

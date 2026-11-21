@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.4.1+2
+
+- Add the Outlook bridge: signed, per-user inbound mail intake that needs no DNS
+  or MX control (patches 0005 and 0006). Devices enroll with an ECDSA P-256 key,
+  and deliveries are verified, replay-protected and stored through the stock
+  intake pipeline. The feature is off unless `ORBIT_MAIL_BRIDGE_REGISTRY_PATH`
+  is set, and it adds no database schema change.
+- Add the PowerShell bridge (`bridge/`) with enroll, run, backfill, status,
+  revoke and logon autostart, plus `docs/bridge.md` and `docs/bridge-signing.md`
+  with shared test vectors.
 - Package the Outlook bridge (`bridge/`) and its docs (`docs/bridge.md`,
   `docs/bridge-signing.md`) in the release zip.
 - `install.ps1` reads the opt-in `ORBIT_MAIL_BRIDGE_REGISTRY_PATH`, creates its

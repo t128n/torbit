@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.1+4
+
 - Rewrite the Outlook bridge in Go (`bridge/`, `torbit-bridge.exe`) with native
   Windows service support, replacing `bridge.ps1` and `TorbitBridge.psm1`. New
   commands: `setup` (guided enroll + Outlook check + service install), `doctor`,

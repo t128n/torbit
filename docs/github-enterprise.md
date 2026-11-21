@@ -1,6 +1,6 @@
 # GitHub Enterprise
 
-`worbit` adds one setting, `ORBIT_GITHUB_URL`, and uses it for every GitHub
+`torbit` adds one setting, `ORBIT_GITHUB_URL`, and uses it for every GitHub
 URL and API call. It supports GitHub Enterprise Server and GitHub Enterprise
 Cloud with data residency.
 
@@ -44,7 +44,7 @@ The first startup with GitHub data binds the database to one origin:
 The binding lives in an unmanaged table, created by code:
 
 ```sql
-CREATE TABLE IF NOT EXISTS worbit_github_host_binding (
+CREATE TABLE IF NOT EXISTS torbit_github_host_binding (
     singleton BIGINT PRIMARY KEY CHECK (singleton = 1),
     origin TEXT NOT NULL
 );
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS worbit_github_host_binding (
 
 It is deliberately not a migration. The main `schema_migrations` stays at the
 stock Orbit version, so an official Orbit binary can still open the database.
-The `worbit_` prefix avoids a collision if upstream adds the same feature.
+The `torbit_` prefix avoids a collision if upstream adds the same feature.
 
 Treat the host as immutable for the life of the database. Changing it would
 point existing App IDs, installation IDs and identity subjects at a different
@@ -68,7 +68,7 @@ GitHub instance.
    `https://<orbit-origin>/api/v1/integrations/github/webhook`.
 
 The GitHub instance must be able to reach that URL. Polling is not part of
-`worbit`; a network where GitHub cannot reach Orbit needs a reverse proxy,
+`torbit`; a network where GitHub cannot reach Orbit needs a reverse proxy,
 tunnel, or a different deployment.
 
 ## Verification

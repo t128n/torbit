@@ -1,4 +1,4 @@
-# Build worbit
+# Build torbit
 
 ## Prerequisites
 
@@ -15,20 +15,20 @@ automatically inside `.work/orbit`.
 ## Build from the pinned tag
 
 ```powershell
-git clone https://github.com/t128n/worbit
-cd worbit
+git clone https://github.com/t128n/torbit
+cd torbit
 
 ./scripts/bootstrap.ps1   # clone upstream at upstream.lock
 ./scripts/verify.ps1      # cumulative git apply --check
 ./scripts/apply.ps1       # patch the checkout
 ./scripts/build.ps1       # bun build + cargo build --release
-./scripts/package.ps1     # artifacts/worbit-windows-x86_64-<version>.zip
+./scripts/package.ps1     # artifacts/torbit-windows-x86_64-<version>.zip
 ```
 
 Outputs:
 
 - `.work/orbit/target/release/orbit.exe`
-- `artifacts/worbit-windows-x86_64-<version>.zip`
+- `artifacts/torbit-windows-x86_64-<version>.zip`
 - `artifacts/SHA256SUMS`
 
 ## What the build does

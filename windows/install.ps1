@@ -2,8 +2,9 @@
 [CmdletBinding()]
 param(
     [string]$Source = (Join-Path $PSScriptRoot "orbit.exe"),
-    [string]$InstallDir = (Join-Path $env:ProgramFiles "Worbit"),
-    [string]$DataDir = (Join-Path $env:ProgramData "Worbit"),
+    # Existing installs keep the pre-rebrand "Worbit" folders; new installs use "Torbit".
+    [string]$InstallDir = $(if ((Test-Path (Join-Path $env:ProgramFiles "Worbit")) -and -not (Test-Path (Join-Path $env:ProgramFiles "Torbit"))) { Join-Path $env:ProgramFiles "Worbit" } else { Join-Path $env:ProgramFiles "Torbit" }),
+    [string]$DataDir = $(if ((Test-Path (Join-Path $env:ProgramData "Worbit")) -and -not (Test-Path (Join-Path $env:ProgramData "Torbit"))) { Join-Path $env:ProgramData "Worbit" } else { Join-Path $env:ProgramData "Torbit" }),
     [string]$ServiceName = "Orbit",
     [string]$EnvFile,
     [string]$Account,
@@ -102,7 +103,12 @@ foreach ($dir in @("data", "backups", "logs", "config")) {
 Set-DirectoryAcl $InstallDir
 Set-DirectoryAcl $DataDir
 
-$ConfigPath = Join-Path $DataDir "config/worbit.env"
+$ConfigPath = Join-Path $DataDir "config/torbit.env"
+$LegacyConfigPath = Join-Path $DataDir "config/worbit.env"
+if (-not (Test-Path $ConfigPath) -and (Test-Path $LegacyConfigPath)) {
+    # Pre-rebrand installs: keep the configuration under its new name.
+    Move-Item $LegacyConfigPath $ConfigPath
+}
 if ($EnvFile) {
     $EnvFile = (Resolve-Path $EnvFile).Path
     $resolvedConfig = [System.IO.Path]::GetFullPath($ConfigPath)
@@ -110,7 +116,7 @@ if ($EnvFile) {
         Copy-Item $EnvFile $ConfigPath -Force
     }
 } elseif (-not (Test-Path $ConfigPath)) {
-    Copy-Item (Join-Path $PSScriptRoot "worbit.env.example") $ConfigPath
+    Copy-Item (Join-Path $PSScriptRoot "torbit.env.example") $ConfigPath
     throw @"
 Created $ConfigPath from the example.
 Edit ORBIT_PUBLIC_ORIGIN, ORBIT_TRUSTED_PROXIES, and the paths, then rerun install.ps1.

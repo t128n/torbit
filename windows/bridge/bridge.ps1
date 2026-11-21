@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# Worbit Outlook bridge command entry.
+# Torbit Outlook bridge command entry.
 # Commands: enroll, run, backfill, status, revoke, install-autostart, remove-autostart.
 param(
     [Parameter(Position = 0, Mandatory)]
@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $scriptPath = $MyInvocation.MyCommand.Path
-Import-Module (Join-Path $here 'WorbitBridge.psm1') -Force
+Import-Module (Join-Path $here 'TorbitBridge.psm1') -Force
 
 function ConvertFrom-Secure([securestring]$s) {
     $p = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s)
@@ -47,7 +47,7 @@ try {
             $cfg = Get-EnrolledConfig
             # One run per user session: the logon task and a manual start must not both deliver.
             $created = $false
-            $mutex = New-Object Threading.Mutex($true, 'Local\WorbitBridgeRun', [ref]$created)
+            $mutex = New-Object Threading.Mutex($true, 'Local\TorbitBridgeRun', [ref]$created)
             if (-not $created) { $mutex.Dispose(); throw 'The bridge is already running for this user.' }
             try {
                 $adapter = New-OutlookAdapter

@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# Worbit Outlook bridge core. Windows PowerShell 5.1 compatible.
+# Torbit Outlook bridge core. Windows PowerShell 5.1 compatible.
 # Extension points for the run/backfill/status/revoke commands:
 #   - Outlook adapter contract: New-OutlookAdapter / any object with the same members (see below)
 #   - Config and state: Get-BridgeHome, Read/Write-BridgeConfig, Read/Write-BridgeState
@@ -10,6 +10,7 @@ Set-StrictMode -Version 2.0
 
 $script:SignatureFormat = 'worbit-bridge-v1'
 $script:MaxBodyBytes = 2097152
+$script:LegacyAutostartTaskName = 'Worbit Bridge'
 $script:HttpTransport = $null
 $script:TpmProvider = 'Microsoft Platform Crypto Provider'
 $script:SoftwareProvider = 'Microsoft Software Key Storage Provider'
@@ -20,8 +21,13 @@ $script:DroppedHeaders = @('content-type', 'content-transfer-encoding', 'mime-ve
 # ---------------------------------------------------------------- config and state
 
 function Get-BridgeHome {
-    if ($env:WORBIT_BRIDGE_HOME) { $dir = $env:WORBIT_BRIDGE_HOME }
-    else { $dir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Worbit\Bridge' }
+    # Pre-rebrand installs keep working: WORBIT_BRIDGE_HOME and %LOCALAPPDATA%\Worbit\Bridge are still used
+    # when the Torbit names are not (the enrolled device config and state live there).
+    $local = [Environment]::GetFolderPath('LocalApplicationData')
+    if ($env:TORBIT_BRIDGE_HOME) { $dir = $env:TORBIT_BRIDGE_HOME }
+    elseif ($env:WORBIT_BRIDGE_HOME) { $dir = $env:WORBIT_BRIDGE_HOME }
+    elseif ((Test-Path -LiteralPath (Join-Path $local 'Worbit\Bridge')) -and -not (Test-Path -LiteralPath (Join-Path $local 'Torbit\Bridge'))) { $dir = Join-Path $local 'Worbit\Bridge' }
+    else { $dir = Join-Path $local 'Torbit\Bridge' }
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     return $dir
 }
@@ -284,11 +290,11 @@ function ConvertTo-MimeMessage {
     $received = [DateTime]::UtcNow
     if ($Item.ReceivedTime) { $received = ([DateTime]$Item.ReceivedTime).ToUniversalTime() }
     if (-not (Test-HasHeader $lines 'Date')) { $lines.Add('Date: ' + (Format-MimeDate $received)) }
-    if (-not (Test-HasHeader $lines 'Message-ID')) { $lines.Add('Message-ID: <' + $seedHash.Substring(0, 32) + '@worbit-bridge.invalid>') }
+    if (-not (Test-HasHeader $lines 'Message-ID')) { $lines.Add('Message-ID: <' + $seedHash.Substring(0, 32) + '@torbit-bridge.invalid>') }
     if (-not (Test-HasHeader $lines 'Subject')) { $lines.Add('Subject: ' + (Format-HeaderText ([string]$Item.Subject))) }
     if (-not (Test-HasHeader $lines 'From')) {
         $addr = [string]$Item.SenderEmail
-        if (-not $addr) { $addr = 'unknown@worbit-bridge.invalid' }
+        if (-not $addr) { $addr = 'unknown@torbit-bridge.invalid' }
         $from = $addr
         if ($Item.SenderName) { $from = (Format-HeaderText ('"' + ([string]$Item.SenderName).Replace('\', '').Replace('"', '') + '"')) + ' <' + $addr + '>' }
         $lines.Add('From: ' + $from)
@@ -303,7 +309,7 @@ function ConvertTo-MimeMessage {
     $hasText = [bool]$text
 
     if ($hasHtml -and $hasText) {
-        $root = New-MimeMultipart 'alternative' ('=_worbit_a_' + $seedHash.Substring(0, 24)) @((New-MimeTextEntity 'plain' $text), (New-MimeTextEntity 'html' $html))
+        $root = New-MimeMultipart 'alternative' ('=_torbit_a_' + $seedHash.Substring(0, 24)) @((New-MimeTextEntity 'plain' $text), (New-MimeTextEntity 'html' $html))
     } elseif ($hasHtml) { $root = New-MimeTextEntity 'html' $html }
     else { $root = New-MimeTextEntity 'plain' $text }
 
@@ -311,11 +317,11 @@ function ConvertTo-MimeMessage {
     $regular = @($atts | Where-Object { -not ($hasHtml -and $_.IsInline -and $_.ContentId) })
     if ($inline.Count -gt 0) {
         $ents = @($root) + @($inline | ForEach-Object { New-MimeAttachmentEntity $_ $true })
-        $root = New-MimeMultipart 'related' ('=_worbit_r_' + $seedHash.Substring(0, 24)) $ents
+        $root = New-MimeMultipart 'related' ('=_torbit_r_' + $seedHash.Substring(0, 24)) $ents
     }
     if ($regular.Count -gt 0) {
         $ents = @($root) + @($regular | ForEach-Object { New-MimeAttachmentEntity $_ ([bool]$_.IsInline) })
-        $root = New-MimeMultipart 'mixed' ('=_worbit_m_' + $seedHash.Substring(0, 24)) $ents
+        $root = New-MimeMultipart 'mixed' ('=_torbit_m_' + $seedHash.Substring(0, 24)) $ents
     }
     $msg = ($lines.ToArray() -join $script:CRLF) + $script:CRLF + $root.Headers + $script:CRLF + $script:CRLF + $root.Body + $script:CRLF
     return , ([Text.Encoding]::ASCII.GetBytes($msg))
@@ -364,7 +370,7 @@ function Get-OriginOf([string]$Server) {
 
 function Assert-BridgeServerUrl([string]$Server) {
     $u = $null
-    if (-not [Uri]::TryCreate($Server, [UriKind]::Absolute, [ref]$u)) { throw 'Server must be a full URL such as https://worbit.example.com.' }
+    if (-not [Uri]::TryCreate($Server, [UriKind]::Absolute, [ref]$u)) { throw 'Server must be a full URL such as https://torbit.example.com.' }
     if ($u.Scheme -ne 'https' -and -not ($u.Scheme -eq 'http' -and $u.IsLoopback)) { throw 'Server must use https (http only for localhost).' }
 }
 
@@ -436,7 +442,7 @@ function Invoke-BridgeEnroll {
     if (-not $Name) { $Name = 'Outlook bridge' }
     if ($Name.Length -gt 80) { $Name = $Name.Substring(0, 80) }
     if ((Read-BridgeConfig) -and -not $Force) { throw 'This computer is already enrolled. Use -Force to enroll again.' }
-    $keyName = 'Worbit-Bridge-' + [guid]::NewGuid().ToString('N')
+    $keyName = 'Torbit-Bridge-' + [guid]::NewGuid().ToString('N')
     $usedProvider = New-BridgeKey -Name $keyName -Provider $Provider
     try {
         $key = Open-BridgeKey $keyName $usedProvider
@@ -656,7 +662,7 @@ function Invoke-BridgeRevoke {
 # ---------------------------------------------------------------- autostart (logon task)
 
 function Install-BridgeAutostart {
-    param([string]$TaskName = 'Worbit Bridge', [Parameter(Mandatory)][string]$ScriptPath)
+    param([string]$TaskName = 'Torbit Bridge', [Parameter(Mandatory)][string]$ScriptPath)
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $action = New-ScheduledTaskAction -Execute $ps -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" run' -f $ScriptPath)
@@ -666,16 +672,20 @@ function Install-BridgeAutostart {
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
     [void](Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force)
+    # A pre-rebrand task would start a second bridge at logon.
+    Unregister-ScheduledTask -TaskName $script:LegacyAutostartTaskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
 function Remove-BridgeAutostart {
-    param([string]$TaskName = 'Worbit Bridge')
+    param([string]$TaskName = 'Torbit Bridge')
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $script:LegacyAutostartTaskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
 function Get-BridgeAutostart {
-    param([string]$TaskName = 'Worbit Bridge')
+    param([string]$TaskName = 'Torbit Bridge')
     $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $t) { $t = Get-ScheduledTask -TaskName $script:LegacyAutostartTaskName -ErrorAction SilentlyContinue }
     return [pscustomobject]@{ TaskName = $TaskName; Installed = [bool]$t }
 }
 
@@ -699,7 +709,7 @@ function Get-OutlookErrorMessage($ErrorRecord) {
 function Get-OutlookAttachments($MailItem) {
     $atts = New-Object Collections.Generic.List[object]
     foreach ($a in $MailItem.Attachments) {
-        $tmp = Join-Path ([IO.Path]::GetTempPath()) ('worbit-' + [guid]::NewGuid().ToString('N'))
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ('torbit-' + [guid]::NewGuid().ToString('N'))
         try {
             $a.SaveAsFile($tmp)
             $cid = ''
@@ -724,7 +734,7 @@ function New-OutlookAdapter {
     # sweeps). The sweep stays the source of truth: a missed event only delays delivery until the next sweep.
     $adapter | Add-Member -MemberType ScriptMethod -Name WaitForNewMail -Value {
         param([int]$TimeoutSeconds)
-        $sid = 'WorbitBridgeNewMail'
+        $sid = 'TorbitBridgeNewMail'
         try {
             if (-not $this.App) { $this.App = New-Object -ComObject Outlook.Application }
             if (-not $this.Subscribed) {
@@ -752,7 +762,7 @@ function New-OutlookAdapter {
             $items.Sort('[ReceivedTime]')
         } catch {
             $msg = Get-OutlookErrorMessage $_
-            if ($this.Subscribed) { Unregister-Event -SourceIdentifier 'WorbitBridgeNewMail' -ErrorAction SilentlyContinue }
+            if ($this.Subscribed) { Unregister-Event -SourceIdentifier 'TorbitBridgeNewMail' -ErrorAction SilentlyContinue }
             $this.App = $null; $this.Subscribed = $false     # Outlook may have been closed; reconnect next time
             throw $msg
         }

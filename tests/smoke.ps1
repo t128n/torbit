@@ -21,8 +21,8 @@ Write-Host "==> orbit.exe --help"
 & $Binary --help | Out-Null
 Assert-ExitCode "orbit.exe --help"
 
-$data = Join-Path ([System.IO.Path]::GetTempPath()) ("worbit-smoke-" + [guid]::NewGuid())
-$config = Join-Path $data "worbit.env"
+$data = Join-Path ([System.IO.Path]::GetTempPath()) ("torbit-smoke-" + [guid]::NewGuid())
+$config = Join-Path $data "torbit.env"
 New-Item -ItemType Directory -Force $data | Out-Null
 try {
     $bytes = [byte[]]::new(32)

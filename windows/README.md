@@ -12,10 +12,10 @@ a development configuration and paths under the extraction directory:
 ORBIT_ENV=development
 ORBIT_BIND=127.0.0.1
 ORBIT_PORT=8080
-ORBIT_DATABASE_PATH=C:\Temp\worbit\data\orbit.sqlite
-ORBIT_ATTACHMENTS_PATH=C:\Temp\worbit\data\attachments
-ORBIT_BACKUPS_PATH=C:\Temp\worbit\backups
-ORBIT_APP_KEY_FILE=C:\Temp\worbit\app.key
+ORBIT_DATABASE_PATH=C:\Temp\torbit\data\orbit.sqlite
+ORBIT_ATTACHMENTS_PATH=C:\Temp\torbit\data\attachments
+ORBIT_BACKUPS_PATH=C:\Temp\torbit\backups
+ORBIT_APP_KEY_FILE=C:\Temp\torbit\app.key
 ```
 
 Do not set `ORBIT_TRUSTED_PROXIES` in development, and leave out
@@ -27,7 +27,7 @@ $bytes = [byte[]]::new(32)
 $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
 try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
 [System.IO.File]::WriteAllText(
-  "C:\Temp\worbit\app.key",
+  "C:\Temp\torbit\app.key",
   [Convert]::ToBase64String($bytes),
   [System.Text.Encoding]::ASCII)
 ```
@@ -35,7 +35,7 @@ try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
 Then start it:
 
 ```powershell
-$env:ORBIT_ENV_FILE = "C:\Temp\worbit\test.env"
+$env:ORBIT_ENV_FILE = "C:\Temp\torbit\test.env"
 .\orbit.exe config check
 .\orbit.exe serve
 ```
@@ -57,19 +57,19 @@ steps.
 ## Install
 
 1. Extract the zip to a temporary directory.
-2. Copy `worbit.env.example` to `worbit.env` and edit it.
+2. Copy `torbit.env.example` to `torbit.env` and edit it.
 3. From an elevated prompt:
 
 ```powershell
-./install.ps1 -EnvFile .\worbit.env
+./install.ps1 -EnvFile .\torbit.env
 ```
 
 `install.ps1`:
 
-- copies `orbit.exe` to `C:\Program Files\Worbit\orbit.exe`;
-- creates `C:\ProgramData\Worbit\{data,backups,logs,config}`;
+- copies `orbit.exe` to `C:\Program Files\Torbit\orbit.exe`;
+- creates `C:\ProgramData\Torbit\{data,backups,logs,config}`;
 - restricts the data and config directories to SYSTEM and Administrators;
-- copies the env file to `C:\ProgramData\Worbit\config\worbit.env`;
+- copies the env file to `C:\ProgramData\Torbit\config\torbit.env`;
 - creates the app key at `ORBIT_APP_KEY_FILE` if that file is missing (unless
   `ORBIT_APP_KEY` is set), adding the setting to the env file when it is absent;
 - runs `orbit.exe config check`;
@@ -88,7 +88,7 @@ reads the same configuration after a reboot without machine-wide variables.
 Start-Service Orbit
 Stop-Service Orbit
 sc.exe query Orbit
-Get-Content C:\ProgramData\Worbit\logs\orbit.log -Tail 100 -Wait
+Get-Content C:\ProgramData\Torbit\logs\orbit.log -Tail 100 -Wait
 ```
 
 `Stop-Service` sends the SCM stop control; Orbit cancels its shutdown token and
@@ -98,7 +98,7 @@ drains HTTP the same way it does on SIGTERM.
 
 ```powershell
 Stop-Service Orbit
-./install.ps1 -EnvFile .\worbit.env
+./install.ps1 -EnvFile .\torbit.env
 ```
 
 Keep the previous `orbit.exe` and a verified backup until the new version has
@@ -117,9 +117,9 @@ The default account is LocalSystem. To use a dedicated account:
 
 ```powershell
 $cred = Get-Credential
-./install.ps1 -EnvFile .\worbit.env -Account $cred.UserName -Password $cred.GetNetworkCredential().Password
+./install.ps1 -EnvFile .\torbit.env -Account $cred.UserName -Password $cred.GetNetworkCredential().Password
 ```
 
 The account needs "Log on as a service" and full control of
-`C:\ProgramData\Worbit`. The install script grants the directory ACL; grant the
+`C:\ProgramData\Torbit`. The install script grants the directory ACL; grant the
 logon right with `secpol.msc` or `ntrights`.

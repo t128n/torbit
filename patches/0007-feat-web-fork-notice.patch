@@ -1,0 +1,179 @@
+From 471a44e85daff903bdb8bc3ffb72b9a3a28f56fb Mon Sep 17 00:00:00 2001
+From: Torben Haack <t@example.invalid>
+Date: Sat, 21 Nov 2026 19:45:39 +0100
+Subject: [PATCH 7/7] feat(web): show an unofficial-fork notice on first open
+
+torbit is an unofficial fork. A dismissible toast says so when the app opens,
+links upstream Orbit and the torbit repository, and remembers the dismissal in
+localStorage.
+---
+ apps/web/src/app/App.tsx                 |  2 +
+ apps/web/src/app/ForkNotice.tsx          | 39 +++++++++++++++++++
+ apps/web/src/app/forkNoticeState.test.ts | 48 ++++++++++++++++++++++++
+ apps/web/src/app/forkNoticeState.ts      | 36 ++++++++++++++++++
+ 4 files changed, 125 insertions(+)
+ create mode 100644 apps/web/src/app/ForkNotice.tsx
+ create mode 100644 apps/web/src/app/forkNoticeState.test.ts
+ create mode 100644 apps/web/src/app/forkNoticeState.ts
+
+diff --git a/apps/web/src/app/App.tsx b/apps/web/src/app/App.tsx
+index 5158795f..100db579 100644
+--- a/apps/web/src/app/App.tsx
++++ b/apps/web/src/app/App.tsx
+@@ -2,6 +2,7 @@ import { ConnectionScreen } from './ConnectionScreen'
+ import { useEffect } from 'react'
+ import { ConfirmationModalHost } from '@/components/common/ConfirmationModal'
+ import { Toaster } from '@/components/ui/sonner'
++import { ForkNotice } from '@/app/ForkNotice'
+ import { NewVersionNotice } from '@/app/NewVersionNotice'
+ import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router'
+ import { setAppNavigate } from '@/lib/navigateBridge'
+@@ -94,6 +95,7 @@ export default function App() {
+       <ConfirmationModalHost />
+       <Toaster />
+       <NewVersionNotice />
++      <ForkNotice />
+       <ConnectionScreen />
+       <Routes>
+         <Route element={<GuestGate />}>
+diff --git a/apps/web/src/app/ForkNotice.tsx b/apps/web/src/app/ForkNotice.tsx
+new file mode 100644
+index 00000000..038545d5
+--- /dev/null
++++ b/apps/web/src/app/ForkNotice.tsx
+@@ -0,0 +1,39 @@
++import { useEffect } from 'react'
++import { toast } from 'sonner'
++import {
++  FORK_NOTICE_TEXT,
++  FORK_URL,
++  UPSTREAM_URL,
++  isForkNoticeDismissed,
++  rememberForkNoticeDismissed,
++} from './forkNoticeState'
++
++const TOAST_ID = 'torbit-fork-notice'
++
++/**
++ * torbit is an unofficial fork. Say so when the app opens: the toast stays until the user dismisses it, and the
++ * dismissal is remembered in this browser.
++ */
++export function ForkNotice() {
++  useEffect(() => {
++    if (isForkNoticeDismissed()) return
++    toast(FORK_NOTICE_TEXT, {
++      id: TOAST_ID,
++      duration: Infinity,
++      description: (
++        <span className="flex gap-3">
++          <a className="underline" href={UPSTREAM_URL} target="_blank" rel="noreferrer noopener">
++            Orbit
++          </a>
++          <a className="underline" href={FORK_URL} target="_blank" rel="noreferrer noopener">
++            torbit
++          </a>
++        </span>
++      ),
++      action: { label: 'Dismiss', onClick: () => rememberForkNoticeDismissed() },
++      onDismiss: () => rememberForkNoticeDismissed(),
++    })
++  }, [])
++
++  return null
++}
+diff --git a/apps/web/src/app/forkNoticeState.test.ts b/apps/web/src/app/forkNoticeState.test.ts
+new file mode 100644
+index 00000000..31a0bd27
+--- /dev/null
++++ b/apps/web/src/app/forkNoticeState.test.ts
+@@ -0,0 +1,48 @@
++import { expect, test } from 'bun:test'
++import {
++  FORK_NOTICE_STORAGE_KEY,
++  FORK_NOTICE_TEXT,
++  FORK_URL,
++  UPSTREAM_URL,
++  isForkNoticeDismissed,
++  rememberForkNoticeDismissed,
++} from './forkNoticeState'
++
++function memoryStorage(initial: Record<string, string> = {}) {
++  const values = new Map(Object.entries(initial))
++  return {
++    getItem: (key: string) => values.get(key) ?? null,
++    setItem: (key: string, value: string) => void values.set(key, value),
++  }
++}
++
++test('the notice names the fork, says it is unofficial and links upstream and this repo', () => {
++  expect(FORK_NOTICE_TEXT).toBe(
++    "torbit is Torben's unofficial fork of Orbit and is not affiliated with or supported by coollabsio.",
++  )
++  expect(UPSTREAM_URL).toBe('https://github.com/coollabsio/orbit')
++  expect(FORK_URL).toBe('https://github.com/t128n/torbit')
++})
++
++test('the notice shows until it is dismissed, then stays dismissed', () => {
++  const storage = memoryStorage()
++  expect(isForkNoticeDismissed(storage)).toBe(false)
++  rememberForkNoticeDismissed(storage)
++  expect(isForkNoticeDismissed(storage)).toBe(true)
++  expect(storage.getItem(FORK_NOTICE_STORAGE_KEY)).toBe('1')
++})
++
++test('blocked or throwing storage never breaks the app and shows the notice', () => {
++  const broken = {
++    getItem: () => {
++      throw new Error('blocked')
++    },
++    setItem: () => {
++      throw new Error('blocked')
++    },
++  }
++  expect(isForkNoticeDismissed(broken)).toBe(false)
++  expect(() => rememberForkNoticeDismissed(broken)).not.toThrow()
++  expect(isForkNoticeDismissed(null)).toBe(false)
++  expect(() => rememberForkNoticeDismissed(null)).not.toThrow()
++})
+diff --git a/apps/web/src/app/forkNoticeState.ts b/apps/web/src/app/forkNoticeState.ts
+new file mode 100644
+index 00000000..fcb7f1c7
+--- /dev/null
++++ b/apps/web/src/app/forkNoticeState.ts
+@@ -0,0 +1,36 @@
++/** The notice that tells people this build is an unofficial fork. Logic only; `ForkNotice.tsx` shows it. */
++
++export const FORK_NOTICE_TEXT =
++  "torbit is Torben's unofficial fork of Orbit and is not affiliated with or supported by coollabsio."
++export const UPSTREAM_URL = 'https://github.com/coollabsio/orbit'
++export const FORK_URL = 'https://github.com/t128n/torbit'
++
++/** Bump the suffix to show the notice again after the wording changed. */
++export const FORK_NOTICE_STORAGE_KEY = 'torbit:fork-notice-dismissed:v1'
++
++type NoticeStorage = Pick<Storage, 'getItem' | 'setItem'>
++
++function defaultStorage(): NoticeStorage | null {
++  try {
++    return typeof window === 'undefined' ? null : window.localStorage
++  } catch {
++    // Blocked site data: show the notice every time rather than never.
++    return null
++  }
++}
++
++export function isForkNoticeDismissed(storage: NoticeStorage | null = defaultStorage()): boolean {
++  try {
++    return storage?.getItem(FORK_NOTICE_STORAGE_KEY) === '1'
++  } catch {
++    return false
++  }
++}
++
++export function rememberForkNoticeDismissed(storage: NoticeStorage | null = defaultStorage()): void {
++  try {
++    storage?.setItem(FORK_NOTICE_STORAGE_KEY, '1')
++  } catch {
++    // Not persisted; the notice shows again on the next visit.
++  }
++}

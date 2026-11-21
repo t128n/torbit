@@ -1,7 +1,7 @@
-From a428ed2d15f285eb743e40d614aef727447e47f6 Mon Sep 17 00:00:00 2001
+From 295b38f893a990d3d48592c5b4121e92a36a8928 Mon Sep 17 00:00:00 2001
 From: Torben Haack <t128n@ipv4.8shield.net>
 Date: Wed, 11 Nov 2026 19:21:12 +0100
-Subject: [PATCH 1/4] feat(windows): add native Windows Service support
+Subject: [PATCH 1/7] feat(windows): add native Windows Service support
 
 Adds 'orbit service install' and 'orbit service uninstall' with --name and --env-file, an SCM control handler wired to the existing graceful-shutdown token, and ORBIT_LOG_FILE for services without a console. Fixes Windows backup restore renames with FILE_SHARE_DELETE and retries on transient sharing violations.
 ---
@@ -566,7 +566,7 @@ index 00000000..9bbb70ab
 +    fn dispatch_requires_the_run_argument_first() {
 +        assert!(is_dispatch_invocation(&args(&[RUN_ARG])));
 +        assert!(is_dispatch_invocation(&args(&[
-+            RUN_ARG, "--name", "Worbit"
++            RUN_ARG, "--name", "Torbit"
 +        ])));
 +        assert!(!is_dispatch_invocation(&args(&["serve"])));
 +        assert!(!is_dispatch_invocation(&args(&["--name", RUN_ARG])));
@@ -577,14 +577,14 @@ index 00000000..9bbb70ab
 +        let options = ServiceOptions::parse(&args(&[
 +            RUN_ARG,
 +            "--env-file",
-+            r"C:\ProgramData\Worbit\worbit.env",
++            r"C:\ProgramData\Torbit\torbit.env",
 +            "--name",
-+            "Worbit",
++            "Torbit",
 +        ]));
-+        assert_eq!(options.name, "Worbit");
++        assert_eq!(options.name, "Torbit");
 +        assert_eq!(
 +            options.env_file.as_deref(),
-+            Some(Path::new(r"C:\ProgramData\Worbit\worbit.env"))
++            Some(Path::new(r"C:\ProgramData\Torbit\torbit.env"))
 +        );
 +    }
 +
@@ -598,8 +598,8 @@ index 00000000..9bbb70ab
 +    #[test]
 +    fn launch_arguments_round_trip() {
 +        let original = ServiceOptions {
-+            name: "Worbit".to_owned(),
-+            env_file: Some(PathBuf::from(r"C:\ProgramData\Worbit\worbit.env")),
++            name: "Torbit".to_owned(),
++            env_file: Some(PathBuf::from(r"C:\ProgramData\Torbit\torbit.env")),
 +        };
 +        let parsed = ServiceOptions::parse(&original.launch_arguments());
 +        assert_eq!(parsed.name, original.name);
@@ -892,10 +892,10 @@ index 8aff3052..80b9962b 100644
 +    #[test]
 +    fn environment_file_parses_comments_export_and_quotes() {
 +        let directory = tempfile::tempdir().unwrap();
-+        let path = directory.path().join("worbit.env");
++        let path = directory.path().join("torbit.env");
 +        std::fs::write(
 +            &path,
-+            "\u{feff}# Orbit configuration\r\nORBIT_ENV=production\r\nexport ORBIT_BIND=\"127.0.0.1\"\r\nORBIT_APP_KEY_FILE='C:\\ProgramData\\Worbit\\config\\app.key'\r\n",
++            "\u{feff}# Orbit configuration\r\nORBIT_ENV=production\r\nexport ORBIT_BIND=\"127.0.0.1\"\r\nORBIT_APP_KEY_FILE='C:\\ProgramData\\Torbit\\config\\app.key'\r\n",
 +        )
 +        .unwrap();
 +        let contents = std::fs::read_to_string(&path).unwrap();
@@ -911,13 +911,13 @@ index 8aff3052..80b9962b 100644
 +        );
 +        assert_eq!(
 +            environment.get("ORBIT_APP_KEY_FILE").map(String::as_str),
-+            Some("C:\\ProgramData\\Worbit\\config\\app.key")
++            Some("C:\\ProgramData\\Torbit\\config\\app.key")
 +        );
 +    }
 +
 +    #[test]
 +    fn environment_file_rejects_a_line_without_a_value() {
-+        let path = Path::new("worbit.env");
++        let path = Path::new("torbit.env");
 +        let mut environment = BTreeMap::new();
 +        let error = apply_environment_file(
 +            path,
@@ -926,7 +926,7 @@ index 8aff3052..80b9962b 100644
 +        )
 +        .unwrap_err();
 +        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-+        assert!(error.to_string().contains("worbit.env:2"));
++        assert!(error.to_string().contains("torbit.env:2"));
 +    }
 +
      #[test]
@@ -1018,6 +1018,3 @@ index 04c977f6..8bffc7c8 100644
 +    }
 +    OpenOptions::new().create(true).append(true).open(path).ok()
 +}
--- 
-2.56.0.windows.4
-

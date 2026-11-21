@@ -2,14 +2,14 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$script:WorbitRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
+$script:TorbitRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 
-function Get-WorbitRoot {
-    return $script:WorbitRoot
+function Get-TorbitRoot {
+    return $script:TorbitRoot
 }
 
 function Get-UpstreamConfig {
-    $path = Join-Path $script:WorbitRoot "upstream.lock"
+    $path = Join-Path $script:TorbitRoot "upstream.lock"
     if (-not (Test-Path $path)) {
         throw "missing $path"
     }
@@ -33,7 +33,7 @@ function Get-UpstreamConfig {
 }
 
 function Get-PatchSeries {
-    $path = Join-Path $script:WorbitRoot "patches/series"
+    $path = Join-Path $script:TorbitRoot "patches/series"
     if (-not (Test-Path $path)) {
         throw "missing $path"
     }
@@ -56,7 +56,7 @@ function Resolve-OrbitRepo {
     param([string]$RepoPath)
 
     if (-not $RepoPath) {
-        $RepoPath = Join-Path $script:WorbitRoot ".work/orbit"
+        $RepoPath = Join-Path $script:TorbitRoot ".work/orbit"
     }
     if (-not (Test-Path (Join-Path $RepoPath ".git"))) {
         throw "no Orbit checkout at $RepoPath; run scripts/bootstrap.ps1 first"

@@ -24,7 +24,7 @@ try {
     # Check the series cumulatively against HEAD, without touching the working tree.
     Invoke-Git $repo read-tree HEAD
     foreach ($name in $patches) {
-        $patch = Join-Path $script:WorbitRoot "patches" $name
+        $patch = Join-Path $script:TorbitRoot "patches" $name
         if (-not (Test-Path $patch)) {
             throw "patches/series lists $name, but the file does not exist"
         }

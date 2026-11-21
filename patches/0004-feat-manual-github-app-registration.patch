@@ -1,7 +1,7 @@
-From 0d025d8d8d00da992321087ad458e3ff6eead512 Mon Sep 17 00:00:00 2001
+From fd2a3b7f48342a3324601cc33846a1c489632147 Mon Sep 17 00:00:00 2001
 From: OpenCode Agent <opencode@localhost>
 Date: Tue, 17 Nov 2026 12:00:00 +0100
-Subject: [PATCH 4/4] feat(github): add manual app registration endpoint
+Subject: [PATCH 4/7] feat(github): add manual app registration endpoint
 
 Adds POST /api/v1/workspaces/{workspace_id}/github/manual-registration
 for manually registering a GitHub App when the manifest flow is not
@@ -187,6 +187,3 @@ index ac6bc929..70bb6521 100644
  #[derive(Deserialize)]
  struct GithubManifestConversion {
      id: i64,
--- 
-2.56.0.windows.4
-

@@ -1,11 +1,16 @@
-# worbit
+# torbit
+
+> **torbit is Torben's unofficial fork of Orbit and is not affiliated with or supported by
+> coollabsio.** Orbit is Copyright coollabsio and Orbit contributors and is licensed under the Apache
+> License, Version 2.0. Upstream: <https://github.com/coollabsio/orbit>. This project:
+> <https://github.com/t128n/torbit>. Formerly called `worbit` ("Windows Orbit"); see `docs/upgrade.md`.
 
 Reproducible Windows builds of [Orbit](https://github.com/coollabsio/orbit) with:
 
 - a **native Windows Service** (`orbit service install`), no WinSW or NSSM;
 - **GitHub Enterprise** host support (GHES and GHEC with data residency).
 
-`worbit` is not a fork. It pins one upstream release tag, applies a small patch
+`torbit` (formerly `worbit`) pins one upstream release tag, applies a small patch
 series, and publishes a Windows binary plus install scripts. Upstream source is
 never vendored in this repository.
 
@@ -17,12 +22,13 @@ Polling is intentionally not included.
 |---|---|
 | `0001` native Windows Service | implemented in `patches/` |
 | `0002` GitHub Enterprise host | implemented in `patches/` |
+| `0007` unofficial-fork notice in the web app | implemented in `patches/` |
 | Windows CI + service smoke test | passing |
 | Release packaging | passing |
 
 The build is Orbit `v0.3.0` plus the native Windows Service and GitHub
 Enterprise host patches. The main database schema remains stock Orbit `0092`;
-the only extra table is the unmanaged `worbit_github_host_binding` used to keep
+the only extra table is the unmanaged `torbit_github_host_binding` used to keep
 the configured GitHub host immutable.
 
 ## How it works
@@ -32,7 +38,7 @@ coollabsio/orbit @ upstream.lock
         +
 patches/series (in order)
         =
-artifacts/worbit-windows-x86_64-<version>.zip
+artifacts/torbit-windows-x86_64-<version>.zip
 ```
 
 - `upstream.lock` pins the exact upstream tag and commit.
@@ -53,8 +59,8 @@ Requirements:
 - PowerShell 7
 
 ```powershell
-git clone https://github.com/t128n/worbit
-cd worbit
+git clone https://github.com/t128n/torbit
+cd torbit
 ./scripts/bootstrap.ps1
 ./scripts/verify.ps1
 ./scripts/apply.ps1
@@ -68,13 +74,13 @@ The binary is `.work/orbit/target/release/orbit.exe`; the zip is under
 ## Install as a Windows Service
 
 The published zip contains `orbit.exe`, `install.ps1`, `uninstall.ps1`, and
-`worbit.env.example`.
+`torbit.env.example`.
 
 ```powershell
 # 1. Copy the zip contents somewhere temporary.
-# 2. Edit worbit.env for your server.
+# 2. Edit torbit.env for your server.
 # 3. Run from an elevated prompt:
-./install.ps1 -EnvFile .\worbit.env
+./install.ps1 -EnvFile .\torbit.env
 ```
 
 `install.ps1` copies `orbit.exe` to a stable path, applies directory ACLs,
@@ -97,12 +103,12 @@ mail from classic Outlook on a user's PC to Orbit. It is off until
 
 ## Releases
 
-Tags are `worbit-v<upstream>+<overlay>`, for example `worbit-v0.3.0+1`.
-`VERSION` must match the tag without the `worbit-v` prefix.
+Tags are `torbit-v<upstream>+<overlay>`, for example `torbit-v0.3.0+1`.
+`VERSION` must match the tag without the `torbit-v` prefix.
 
 Each release contains:
 
-- `worbit-windows-x86_64-<version>.zip`
+- `torbit-windows-x86_64-<version>.zip`
 - `SHA256SUMS`
 
 ## Layout
@@ -118,13 +124,13 @@ tests/          binary and service smoke tests
 
 ## Upstream contributions
 
-The generic pieces belong upstream. `worbit` keeps the fork
+The generic pieces belong upstream. `torbit` keeps the fork
 [`t128n/orbit`](https://github.com/t128n/orbit) as the authoring and PR
 vehicle; its `main` mirrors upstream and feature branches carry the work.
 This repository only pins and builds.
 
 ## License
 
-`worbit` patches and scripts are Apache-2.0. Built binaries contain Orbit and
+`torbit` patches and scripts are Apache-2.0. Built binaries contain Orbit and
 remain subject to Orbit's Apache-2.0 license and notices. See [LICENSE](LICENSE)
 and [NOTICE](NOTICE).

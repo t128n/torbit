@@ -2,7 +2,7 @@ name: release
 
 on:
   push:
-    tags: ["worbit-v*"]
+    tags: ["torbit-v*"]
 
 permissions:
   contents: write
@@ -21,7 +21,7 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
-          $expected = "worbit-v$version"
+          $expected = "torbit-v$version"
           if ($env:GITHUB_REF_NAME -ne $expected) {
             throw "tag '$env:GITHUB_REF_NAME' does not match VERSION; expected '$expected'"
           }
@@ -90,7 +90,7 @@ jobs:
             gh release upload $tag @assets --clobber
           } else {
             gh release create $tag @assets `
-              --title "worbit $version" `
+              --title "torbit $version" `
               --notes "Upstream Orbit from upstream.lock; see CHANGELOG.md." `
               --generate-notes
           }

@@ -2,7 +2,7 @@
 
 ## Model
 
-`worbit` pins an upstream tag and applies an ordered series. Patches are
+`torbit` pins an upstream tag and applies an ordered series. Patches are
 generated from the authoring fork `t128n/orbit`; they are never edited by
 hand.
 
@@ -10,7 +10,8 @@ hand.
 patches/
 ├── series
 ├── 0001-feat-windows-native-service.patch
-└── 0002-feat-github-enterprise-host.patch
+├── 0002-feat-github-enterprise-host.patch
+└── ... (see `patches/README.md`)
 ```
 
 `series` controls order and can carry comments:
@@ -50,14 +51,14 @@ In the authoring fork:
 git fetch upstream --tags
 git switch -c rebase/v0.4.0 upstream/v0.4.0
 git cherry-pick <feature commits>
-# or: git am -3 <../worbit/patches/*.patch>
+# or: git am -3 <../torbit/patches/*.patch>
 ```
 
 Resolve conflicts with `git rerere` enabled. Build and test on Windows, then
 export:
 
 ```bash
-git format-patch upstream/v0.4.0..HEAD --output-directory ../worbit/patches
+git format-patch upstream/v0.4.0..HEAD --output-directory ../torbit/patches
 ```
 
 Rename the files to the `NNNN-type-slug.patch` convention and update `series`.
@@ -69,8 +70,8 @@ A custom migration makes `schema_migrations` newer than stock Orbit, so an
 official binary refuses to open the database (`SchemaNewer`, `UnknownMigration`,
 or `ChecksumMismatch`).
 
-Worbit-only schema must be created by code in an unmanaged `worbit_*` table.
-The GitHub host binding already uses `worbit_github_host_binding`. Keep the
+Torbit-only schema must be created by code in an unmanaged `torbit_*` table.
+The GitHub host binding already uses `torbit_github_host_binding`. Keep the
 prefix so an upstream feature cannot collide with it.
 
 ## Keep the series small
@@ -87,3 +88,4 @@ prefix so an upstream feature cannot collide with it.
 |---|---|---|
 | Native Windows Service | coollabsio/orbit#81 | local, upstreamable |
 | GitHub Enterprise host | coollabsio/orbit#82 | local, upstreamable |
+| Outlook bridge, unofficial-fork notice | none | local only |

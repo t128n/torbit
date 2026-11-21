@@ -188,8 +188,10 @@ device in Orbit).
 ## Moving from the PowerShell bridge
 
 Earlier versions were `bridge.ps1`. The Go bridge reads the same
-`config.json`, `state.json`, key store entry and wire format, so an enrolled PC
-needs no re-enrollment and delivered mail is not sent again: copy
+`config.json`, `state.json` and key store entry, so an enrolled PC
+needs no re-enrollment (the server must be the build with the `torbit-bridge-v1`
+wire format; a bridge folder still named `Worbit\Bridge` has to be moved to
+`%LOCALAPPDATA%\Torbit\Bridge`) and delivered mail is not sent again: copy
 `torbit-bridge.exe` over, run `torbit-bridge install`, which also removes the
 old "Torbit Bridge" logon task. Differences: the bridge no longer listens for
 Outlook's new-mail event, it sweeps every 60 seconds instead (set `--interval`

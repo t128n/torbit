@@ -17,14 +17,10 @@ import (
 	"time"
 )
 
-// Home returns the per-user bridge directory and creates it. Pre-rebrand
-// installs keep working: WORBIT_BRIDGE_HOME and %LOCALAPPDATA%\Worbit\Bridge
-// are used when the Torbit names are not.
+// Home returns the per-user bridge directory (TORBIT_BRIDGE_HOME, else
+// %LOCALAPPDATA%\Torbit\Bridge) and creates it.
 func Home() (string, error) {
 	dir := os.Getenv("TORBIT_BRIDGE_HOME")
-	if dir == "" {
-		dir = os.Getenv("WORBIT_BRIDGE_HOME")
-	}
 	if dir == "" {
 		local := os.Getenv("LOCALAPPDATA")
 		if local == "" {
@@ -37,21 +33,13 @@ func Home() (string, error) {
 			}
 			local = c
 		}
-		legacy := filepath.Join(local, "Worbit", "Bridge")
-		current := filepath.Join(local, "Torbit", "Bridge")
-		if exists(legacy) && !exists(current) {
-			dir = legacy
-		} else {
-			dir = current
-		}
+		dir = filepath.Join(local, "Torbit", "Bridge")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil
 }
-
-func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // Config is config.json. It holds no secrets: the private key stays in the key
 // store and the enrollment credential is never saved.

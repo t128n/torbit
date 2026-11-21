@@ -143,7 +143,7 @@ func resolveInstallUser(user string) (sid, name string, err error) {
 // The logon-task autostart of the PowerShell bridge would start a second
 // bridge next to the service.
 func removeLegacyTasks(say func(string, ...any)) {
-	for _, t := range []string{"Torbit Bridge", "Worbit Bridge"} {
+	for _, t := range []string{"Torbit Bridge"} {
 		if exec.Command("schtasks", "/Query", "/TN", t).Run() == nil {
 			if exec.Command("schtasks", "/Delete", "/TN", t, "/F").Run() == nil {
 				say("Removed the old logon task %q (the service replaces it).", t)

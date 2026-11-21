@@ -41,7 +41,9 @@ The script asks for your Orbit session token if you do not pass one. It makes a
 key pair on the PC (in the TPM when one is available), registers the public
 key, and stores the device id and server in
 `%LOCALAPPDATA%\Worbit\Bridge\config.json`. Use `-Force` to replace an existing
-enrollment.
+enrollment. With `-Force`, items that were skipped because the old device was
+rejected (HTTP 401 or 404) are forgotten, so the next sweep sends them again;
+items skipped as too large (413) or for another reason stay skipped.
 
 ### run
 
@@ -59,7 +61,9 @@ do not repeat mail. Deleting or moving a mail in Outlook is not sent to Orbit.
 When Orbit or the network is not reachable (HTTP 503 and similar), the bridge
 retries with a growing wait, then tries again at the next sweep. If Orbit
 answers 401 or 413 (or another 4xx), the item is recorded as skipped and not
-sent again. Only one `run` can be active per Windows user. The log is
+sent again. Attachments are read from Outlook one item at a time, only when the
+item is sent; an item that Outlook reports as larger than 2 MiB is skipped
+(413, too large) without reading its attachments. Only one `run` can be active per Windows user. The log is
 `bridge.log` in `%LOCALAPPDATA%\Worbit\Bridge`; it has events and ids only,
 never message text.
 

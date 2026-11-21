@@ -21,6 +21,11 @@ Test-Case 'install.ps1 handles the registry path and ACLs' {
     $text = Get-Content -Raw (Join-Path $root 'windows/install.ps1')
     Assert-True ($text -match 'ORBIT_MAIL_BRIDGE_REGISTRY_PATH') 'install.ps1 does not read ORBIT_MAIL_BRIDGE_REGISTRY_PATH'
     Assert-True ($text -match 'Set-DirectoryAcl \$RegistryDir') 'install.ps1 does not apply the directory ACL to the registry directory'
+    # always, not only for a directory outside the data directory and not only when the file exists
+    $block = $text.Substring($text.IndexOf('$RegistryDir = '))
+    $block = $block.Substring(0, $block.IndexOf('Write-Host "Bridge registry'))
+    Assert-True ($block -notmatch 'StartsWith') 'the registry directory ACL must not depend on where the directory is'
+    Assert-True ($block -match '(?m)^    Set-DirectoryAcl \$RegistryDir') 'the registry directory ACL must be applied unconditionally'
 }
 Test-Case 'env example documents the registry path as opt-in' {
     $text = Get-Content -Raw (Join-Path $root 'windows/worbit.env.example')

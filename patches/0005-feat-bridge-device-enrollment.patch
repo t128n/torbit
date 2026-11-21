@@ -1,4 +1,4 @@
-From 93f25b91b686f7a182c9bc25356827e7e48ab43e Mon Sep 17 00:00:00 2001
+From d0bc0c79905a28ee7b6c322bcf916c0ab445093d Mon Sep 17 00:00:00 2001
 From: Torben <x@x.invalid>
 Date: Sat, 21 Nov 2026 17:18:34 +0100
 Subject: [PATCH] feat(mail): add Worbit bridge device enrollment
@@ -7,7 +7,7 @@ Subject: [PATCH] feat(mail): add Worbit bridge device enrollment
  apps/server/src/app.rs                |   9 +-
  apps/server/src/cli.rs                |   6 +
  apps/server/src/lib.rs                |   1 +
- apps/server/src/mail_bridge.rs        | 381 ++++++++++++++++
+ apps/server/src/mail_bridge.rs        | 384 +++++++++++++++++
  apps/server/src/mail_dns.rs           |   4 +
  apps/server/src/mail_routes/bridge.rs | 256 +++++++++++
  apps/server/src/mail_routes/mod.rs    |  28 ++
@@ -16,7 +16,7 @@ Subject: [PATCH] feat(mail): add Worbit bridge device enrollment
  apps/server/tests/openapi_contract.rs |   4 +-
  crates/platform/src/config.rs         |   6 +
  crates/platform/tests/config.rs       |   5 +
- 12 files changed, 1298 insertions(+), 3 deletions(-)
+ 12 files changed, 1301 insertions(+), 3 deletions(-)
  create mode 100644 apps/server/src/mail_bridge.rs
  create mode 100644 apps/server/src/mail_routes/bridge.rs
  create mode 100644 apps/server/tests/mail_bridge.rs
@@ -72,10 +72,10 @@ index 96a419bd..c8b1cbac 100644
  pub mod mail_image_proxy;
 diff --git a/apps/server/src/mail_bridge.rs b/apps/server/src/mail_bridge.rs
 new file mode 100644
-index 00000000..07df6432
+index 00000000..b4737000
 --- /dev/null
 +++ b/apps/server/src/mail_bridge.rs
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,384 @@
 +//! Worbit bridge devices: the device registry file and the destination a device delivers to.
 +//!
 +//! The registry is one JSON file (`ORBIT_MAIL_BRIDGE_REGISTRY_PATH`): a device id, the device's
@@ -94,10 +94,9 @@ index 00000000..07df6432
 +
 +use base64::Engine as _;
 +use base64::engine::general_purpose::STANDARD;
-+use orbit_platform::{Database, Id, TimestampMillis};
++use orbit_platform::{Database, Id, Row as _, TimestampMillis};
 +use rand_core::RngCore as _;
 +use serde::{Deserialize, Serialize};
-+use sqlx::Row as _;
 +use thiserror::Error;
 +use tokio::sync::Mutex;
 +
@@ -283,6 +282,11 @@ index 00000000..07df6432
 +    result
 +}
 +
++/// The fixed header of a P-256 SubjectPublicKeyInfo DER, before the point.
++const SPKI_P256_HEADER_LEN: usize = 26;
++/// The header, then the 65 bytes of the uncompressed point (0x04, x, y).
++const SPKI_P256_LEN: usize = SPKI_P256_HEADER_LEN + 65;
++
 +/// A public key in the registry format: SPKI DER of an uncompressed NIST P-256 point, base64.
 +/// Returns the canonical base64, or `None` when the key is not one.
 +#[must_use]
@@ -290,8 +294,7 @@ index 00000000..07df6432
 +    use p256::pkcs8::DecodePublicKey as _;
 +
 +    let der = STANDARD.decode(value.trim()).ok()?;
-+    // 26 bytes of header, then the 65 bytes of the uncompressed point (0x04, x, y)
-+    if der.len() != 91 || der.get(26) != Some(&0x04) {
++    if der.len() != SPKI_P256_LEN || der.get(SPKI_P256_HEADER_LEN) != Some(&0x04) {
 +        return None;
 +    }
 +    p256::PublicKey::from_public_key_der(&der).ok()?;

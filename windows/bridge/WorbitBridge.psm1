@@ -418,6 +418,209 @@ function Invoke-BridgeEnroll {
     }
 }
 
+# ---------------------------------------------------------------- run loop, sweep, backfill
+
+# state.json: { version, cursor, last_run, last_sweep, items: { <entry id>: { outcome, status, at } }, pending: [ids] }.
+# items is the dedupe record: an entry id in it is never sent again (outcome delivered or skipped).
+# Only ids, outcomes and times are stored; never subjects, addresses or bodies.
+$script:RetryDelays = @(5, 15, 45)      # seconds between attempts for 5xx and network errors
+$script:CursorOverlap = [TimeSpan]::FromMinutes(10)
+
+function Get-PropOrNull($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($p) { return $p.Value }
+    return $null
+}
+
+function ConvertTo-UtcDate($Value) {
+    if ($Value -is [DateTime]) { return $Value.ToUniversalTime() }
+    $styles = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+    return [DateTime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, $styles)
+}
+
+function Get-BridgeRunState {
+    $s = @{ version = 1; cursor = $null; last_run = $null; last_sweep = $null
+        items = (New-Object Collections.Hashtable ([StringComparer]::Ordinal)); pending = @() }
+    $raw = Read-BridgeState
+    if (-not $raw) { return $s }
+    foreach ($k in 'cursor', 'last_run', 'last_sweep') { $v = Get-PropOrNull $raw $k; if ($v) { $s[$k] = (ConvertTo-UtcDate $v).ToString('o') } }
+    $items = Get-PropOrNull $raw 'items'
+    if ($items) {
+        foreach ($p in $items.PSObject.Properties) {
+            $s.items[$p.Name] = @{ outcome = [string]$p.Value.outcome; status = [int]$p.Value.status; at = [string]$p.Value.at }
+        }
+    }
+    $s.pending = @(@(Get-PropOrNull $raw 'pending') | Where-Object { $_ })
+    return $s
+}
+
+# Read-modify-write so a concurrent backfill and run do not overwrite each other's records.
+function Update-BridgeRunState([scriptblock]$Mutate) {
+    $s = Get-BridgeRunState
+    & $Mutate $s
+    Write-BridgeState $s
+}
+
+function Get-BackoffDelay([int]$Attempt) {
+    $i = [Math]::Min($Attempt - 1, $script:RetryDelays.Count - 1)
+    return $script:RetryDelays[$i]
+}
+
+# Delivers every Inbox item received at or after $Since that is not yet in the state. 503/network errors
+# are retried with backoff; when attempts run out the rest of the sweep waits for the next sweep.
+# 401/404/413 and other 4xx are recorded as skipped and never sent again.
+function Invoke-BridgeSweep {
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][scriptblock]$Signer, [Parameter(Mandatory)]$Adapter,
+        [Parameter(Mandatory)][DateTime]$Since, [scriptblock]$Sleep, [switch]$TrackPending, [int]$MaxAttempts = 4)
+    if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
+    $sinceUtc = $Since.ToUniversalTime()
+    $known = (Get-BridgeRunState).items
+    $items = @(@($Adapter.GetInboxItems($sinceUtc)) | Where-Object { $_ -and (ConvertTo-UtcDate $_.ReceivedTime) -ge $sinceUtc })
+    $res = [pscustomobject]@{ Seen = $items.Count; Delivered = 0; Skipped = 0; Pending = 0 }
+    $unresolved = New-Object Collections.Generic.List[object]
+    $halted = $false
+    foreach ($item in $items) {
+        $id = [string]$item.EntryId
+        if ($known.ContainsKey($id)) { continue }
+        if ($halted) { $unresolved.Add($item); continue }
+        $attempt = 0
+        do {
+            $attempt++
+            $r = Send-BridgeItem -Config $Config -Signer $Signer -Item $item
+            $again = ($r.Outcome -eq 'Retry' -and $attempt -lt $MaxAttempts)
+            if ($again) { & $Sleep (Get-BackoffDelay $attempt) }
+        } while ($again)
+        if ($r.Outcome -eq 'Retry') { $halted = $true; $unresolved.Add($item); continue }
+        if ($r.Outcome -eq 'Delivered') { $outcome = 'delivered'; $res.Delivered++ } else { $outcome = 'skipped'; $res.Skipped++ }
+        $rec = @{ outcome = $outcome; status = [int]$r.Status; at = [DateTime]::UtcNow.ToString('o') }
+        Update-BridgeRunState { param($s) $s.items[$id] = $rec }.GetNewClosure()
+        $known[$id] = $rec
+    }
+    $res.Pending = $unresolved.Count
+    if ($TrackPending) {
+        $pendingIds = @($unresolved | ForEach-Object { [string]$_.EntryId })
+        $cursor = $null
+        if ($unresolved.Count -gt 0) { $cursor = ($unresolved | ForEach-Object { ConvertTo-UtcDate $_.ReceivedTime } | Sort-Object | Select-Object -First 1) }
+        elseif ($items.Count -gt 0) { $cursor = ($items | ForEach-Object { ConvertTo-UtcDate $_.ReceivedTime } | Sort-Object | Select-Object -Last 1) }
+        $now = [DateTime]::UtcNow.ToString('o')
+        Update-BridgeRunState {
+            param($s)
+            $s.pending = $pendingIds; $s.last_run = $now; $s.last_sweep = $now
+            if ($cursor) { $s.cursor = $cursor.ToString('o') }
+        }.GetNewClosure()
+    }
+    Write-BridgeLog ('sweep: seen {0}, delivered {1}, skipped {2}, pending {3}' -f $res.Seen, $res.Delivered, $res.Skipped, $res.Pending)
+    return $res
+}
+
+# One sweep from the stored cursor (minus an overlap for clock skew; dedupe makes the overlap harmless).
+# The first sweep starts at the enrollment time: older mail is the job of backfill.
+function Invoke-BridgeRunOnce {
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][scriptblock]$Signer, [Parameter(Mandatory)]$Adapter, [scriptblock]$Sleep)
+    $state = Get-BridgeRunState
+    if ($state.cursor) { $since = (ConvertTo-UtcDate $state.cursor) - $script:CursorOverlap }
+    else { $since = ConvertTo-UtcDate $Config.enrolled_at }
+    return (Invoke-BridgeSweep -Config $Config -Signer $Signer -Adapter $Adapter -Since $since -Sleep $Sleep -TrackPending)
+}
+
+# Sweeps now and then every $IntervalSeconds. A new-mail event from the adapter (WaitForNewMail) cuts the
+# wait short. A failing sweep (Outlook closed, Orbit down) is logged and tried again at the next wake-up.
+function Invoke-BridgeRun {
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][scriptblock]$Signer, [Parameter(Mandatory)]$Adapter,
+        [int]$IntervalSeconds = 300, [int]$MaxIterations = 0, [scriptblock]$Sleep)
+    if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
+    $i = 0
+    while ($true) {
+        $i++
+        try { [void](Invoke-BridgeRunOnce -Config $Config -Signer $Signer -Adapter $Adapter -Sleep $Sleep) }
+        catch { Write-BridgeLog ('sweep failed: ' + $_.Exception.Message) }
+        if ($MaxIterations -gt 0 -and $i -ge $MaxIterations) { break }
+        if ($Adapter.PSObject.Methods['WaitForNewMail']) {
+            try { $Adapter.WaitForNewMail($IntervalSeconds) } catch { Write-BridgeLog ('wait failed: ' + $_.Exception.Message); & $Sleep $IntervalSeconds }
+        } else { & $Sleep $IntervalSeconds }
+    }
+}
+
+# One-off delivery of Inbox items received since a date. Shares the dedupe record with run, so items that
+# were already delivered or skipped are not sent again. Does not move the run cursor.
+function Invoke-BridgeBackfill {
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][scriptblock]$Signer, [Parameter(Mandatory)]$Adapter,
+        [Parameter(Mandatory)][DateTime]$Since, [scriptblock]$Sleep)
+    return (Invoke-BridgeSweep -Config $Config -Signer $Signer -Adapter $Adapter -Since $Since -Sleep $Sleep)
+}
+
+function Get-BridgeStatus {
+    $cfg = Read-BridgeConfig
+    if (-not $cfg) { return [pscustomobject]@{ Enrolled = $false } }
+    $state = Get-BridgeRunState
+    $keyPresent = $false
+    try { $k = Open-BridgeKey $cfg.key_name $cfg.key_provider; $k.Dispose(); $keyPresent = $true } catch { }
+    $skipped = @($state.items.Values | Where-Object { $_.outcome -eq 'skipped' }).Count
+    $delivered = @($state.items.Values | Where-Object { $_.outcome -eq 'delivered' }).Count
+    return [pscustomobject]@{
+        Enrolled = $true; DeviceId = [string]$cfg.device_id; Server = [string]$cfg.server; Address = [string]$cfg.address
+        KeyProvider = [string]$cfg.key_provider; KeyPresent = $keyPresent
+        LastRun = $state.last_run; Delivered = $delivered; Skipped = $skipped; Pending = @($state.pending).Count
+    }
+}
+
+# ---------------------------------------------------------------- revoke / unenroll
+
+# Revokes this device on the server (DELETE of the device, session or API token as for enroll), then removes the
+# CNG key, config and state. With -LocalOnly the server is not called (device already revoked in Orbit, or Orbit
+# is gone). The log stays. The credential is used for this call only and is never stored or logged.
+function Invoke-BridgeRevoke {
+    param([string]$Credential, [ValidateSet('session', 'api')][string]$CredentialKind = 'session', [switch]$LocalOnly)
+    $cfg = Read-BridgeConfig
+    if (-not $cfg) { throw 'This computer is not enrolled.' }
+    if (-not $LocalOnly) {
+        if (-not $Credential) { throw 'A credential is needed to revoke the device in Orbit. Use -LocalOnly to only remove the local data.' }
+        Assert-BridgeServerUrl ([string]$cfg.server)
+        $headers = @{ Origin = (Get-OriginOf ([string]$cfg.server)); Accept = 'application/json' }
+        if ($CredentialKind -eq 'api') { $headers['Authorization'] = 'Bearer ' + $Credential }
+        else { $headers['Cookie'] = '__Host-orbit_session=' + $Credential }
+        $url = ([string]$cfg.server).TrimEnd('/') + '/api/v1/workspaces/' + [uri]::EscapeDataString([string]$cfg.workspace_id) + '/mail/bridge/devices/' + [uri]::EscapeDataString([string]$cfg.device_id)
+        $res = Invoke-BridgeHttp @{ Method = 'DELETE'; Url = $url; Headers = $headers; ContentType = $null; Body = $null }
+        $status = [int]$res.Status
+        if ($status -ne 204 -and $status -ne 200) {
+            if ($status -eq 401 -or $status -eq 403) { throw 'Orbit did not accept the credential. Sign in again and use a fresh session token.' }
+            if ($status -eq 404) { throw 'Orbit does not know this device. If it was already removed, run revoke with -LocalOnly.' }
+            if ($status -eq 0) { throw 'Could not reach Orbit. Check the server URL and your network or proxy.' }
+            throw ('Revoke failed with status {0}.' -f $status)
+        }
+    }
+    Remove-BridgeKey ([string]$cfg.key_name) ([string]$cfg.key_provider)
+    foreach ($p in (Get-BridgeConfigPath), (Get-BridgeStatePath)) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+    Write-BridgeLog ('revoked device {0}; local key, config and state removed' -f $cfg.device_id)
+}
+
+# ---------------------------------------------------------------- autostart (logon task)
+
+function Install-BridgeAutostart {
+    param([string]$TaskName = 'Worbit Bridge', [Parameter(Mandatory)][string]$ScriptPath)
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $ps -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" run' -f $ScriptPath)
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+    # Interactive + Limited: runs in the signed-in user's session, not elevated, like Outlook.
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+    [void](Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force)
+}
+
+function Remove-BridgeAutostart {
+    param([string]$TaskName = 'Worbit Bridge')
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+}
+
+function Get-BridgeAutostart {
+    param([string]$TaskName = 'Worbit Bridge')
+    $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    return [pscustomobject]@{ TaskName = $TaskName; Installed = [bool]$t }
+}
+
 # ---------------------------------------------------------------- Outlook adapter
 
 function Get-OutlookErrorMessage($ErrorRecord) {
@@ -439,16 +642,44 @@ function Get-OutlookErrorMessage($ErrorRecord) {
 # This is the real Outlook COM adapter (manual testing only). Tests pass a fake with the same method.
 function New-OutlookAdapter {
     $adapter = New-Object psobject
+    $adapter | Add-Member -MemberType NoteProperty -Name App -Value $null
+    $adapter | Add-Member -MemberType NoteProperty -Name Subscribed -Value $false
+    # Optional. Blocks up to $TimeoutSeconds, returns early on Outlook's NewMailEx event (the run loop then
+    # sweeps). The sweep stays the source of truth: a missed event only delays delivery until the next sweep.
+    $adapter | Add-Member -MemberType ScriptMethod -Name WaitForNewMail -Value {
+        param([int]$TimeoutSeconds)
+        $sid = 'WorbitBridgeNewMail'
+        try {
+            if (-not $this.App) { $this.App = New-Object -ComObject Outlook.Application }
+            if (-not $this.Subscribed) {
+                [void](Register-ObjectEvent -InputObject $this.App -EventName NewMailEx -SourceIdentifier $sid)
+                $this.Subscribed = $true
+            }
+            $e = Wait-Event -SourceIdentifier $sid -Timeout $TimeoutSeconds
+            if ($e) { Remove-Event -SourceIdentifier $sid -ErrorAction SilentlyContinue; Start-Sleep -Seconds 3 }
+        } catch {
+            Write-BridgeLog 'new-mail listener not available; waiting for the next sweep'
+            Unregister-Event -SourceIdentifier $sid -ErrorAction SilentlyContinue
+            $this.App = $null; $this.Subscribed = $false
+            Start-Sleep -Seconds $TimeoutSeconds
+        }
+    }
     $adapter | Add-Member -MemberType ScriptMethod -Name GetInboxItems -Value {
         param([DateTime]$Since)
         try {
-            $app = New-Object -ComObject Outlook.Application
+            if (-not $this.App) { $this.App = New-Object -ComObject Outlook.Application }
+            $app = $this.App
             $ns = $app.GetNamespace('MAPI')
             $inbox = $ns.GetDefaultFolder(6)
             $filter = "[ReceivedTime] >= '" + $Since.ToLocalTime().ToString('g', [Globalization.CultureInfo]::GetCultureInfo('en-US')) + "'"
             $items = $inbox.Items.Restrict($filter)
             $items.Sort('[ReceivedTime]')
-        } catch { throw (Get-OutlookErrorMessage $_) }
+        } catch {
+            $msg = Get-OutlookErrorMessage $_
+            if ($this.Subscribed) { Unregister-Event -SourceIdentifier 'WorbitBridgeNewMail' -ErrorAction SilentlyContinue }
+            $this.App = $null; $this.Subscribed = $false     # Outlook may have been closed; reconnect next time
+            throw $msg
+        }
         $out = New-Object Collections.Generic.List[object]
         foreach ($mi in $items) {
             if ($mi.Class -ne 43) { continue }
@@ -484,4 +715,6 @@ Get-BridgeStatePath, Read-BridgeState, Write-BridgeState, Write-BridgeLog,
 New-BridgeKey, Open-BridgeKey, Remove-BridgeKey, Get-BridgePublicKeySpki, New-BridgeSigner, Get-BridgeSigner,
 New-BridgeNonce, Get-BridgeSignedString, New-BridgeRequestHeaders,
 ConvertTo-MimeMessage, Set-BridgeHttpTransport, Send-BridgeMessage, Send-BridgeItem,
-Invoke-BridgeEnroll, Get-OutlookErrorMessage, New-OutlookAdapter
+Invoke-BridgeEnroll, Get-OutlookErrorMessage, New-OutlookAdapter,
+Invoke-BridgeSweep, Invoke-BridgeRunOnce, Invoke-BridgeRun, Invoke-BridgeBackfill, Get-BridgeStatus,
+Invoke-BridgeRevoke, Install-BridgeAutostart, Remove-BridgeAutostart, Get-BridgeAutostart

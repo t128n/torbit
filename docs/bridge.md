@@ -45,28 +45,60 @@ enrollment.
 
 ### run
 
-Reads new items from the Outlook inbox and delivers them. Run it by hand or
-from a scheduled task for the signed-in user. Delivery is retried later when
-Orbit or the network is not reachable.
+```powershell
+.\bridge.ps1 run [-IntervalSeconds 300]
+```
+
+Stays running. It delivers new items from the Outlook inbox (the Inbox folder
+only, not subfolders, Sent or Junk) when Outlook reports new mail, and sweeps
+by received time every `-IntervalSeconds` as a safety net. The first sweep
+starts at the enrollment time. Each item is delivered once: the entry ids are
+kept in `state.json` next to `config.json`, so restarts and overlapping sweeps
+do not repeat mail. Deleting or moving a mail in Outlook is not sent to Orbit.
+
+When Orbit or the network is not reachable (HTTP 503 and similar), the bridge
+retries with a growing wait, then tries again at the next sweep. If Orbit
+answers 401 or 413 (or another 4xx), the item is recorded as skipped and not
+sent again. Only one `run` can be active per Windows user. The log is
+`bridge.log` in `%LOCALAPPDATA%\Worbit\Bridge`; it has events and ids only,
+never message text.
+
+### install-autostart / remove-autostart
+
+```powershell
+.\bridge.ps1 install-autostart
+.\bridge.ps1 remove-autostart
+```
+
+Adds or removes a scheduled task, "Worbit Bridge", that starts `run` when you
+sign in. It runs in your own session, not elevated, so it can use Outlook.
 
 ### backfill
 
-Delivers older inbox items, starting at a date you give, once. Items already
-delivered are skipped.
+```powershell
+.\bridge.ps1 backfill -Since 2026-01-01
+```
+
+Delivers inbox items received since the date, once. Items already delivered or
+skipped (by `run` or an earlier backfill) are not sent again.
 
 ### status
 
-Shows the device id, server, key location, last run and the number of items
-waiting to retry.
+Shows the device id, server, key location, last run, the number of delivered
+and skipped items, the number waiting to retry, and whether autostart is on.
 
 ### revoke
 
-Marks this device as revoked on the server and deletes the local key. Orbit
-refuses all later deliveries from the device. To stop a lost PC, revoke its
-device in Orbit.
+```powershell
+.\bridge.ps1 revoke [-SessionToken <token> | -ApiToken <token>] [-LocalOnly]
+```
 
-`run`, `backfill`, `status` and `revoke` are being added to `bridge.ps1`; check
-`Get-Help .\bridge.ps1` in your release for the commands it supports.
+Marks this device as revoked in Orbit (this needs your Orbit credential, as for
+`enroll`), then deletes the local key, `config.json`, `state.json` and the
+autostart task. Orbit refuses all later deliveries from the device. If the
+server call fails, nothing is removed locally. Use `-LocalOnly` to remove only
+the local data, for example when the device is already revoked in Orbit. To
+stop a lost PC, revoke its device in Orbit.
 
 ## Manual COM verification checklist
 

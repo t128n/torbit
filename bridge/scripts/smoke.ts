@@ -21,11 +21,13 @@ const server = Bun.serve({
   },
 });
 
-function bridge(...args: string[]) {
-  const r = Bun.spawnSync([exe, ...args], { env, stdout: "pipe", stderr: "pipe" });
-  const text = r.stdout.toString() + r.stderr.toString();
-  console.log(`\n> torbit-bridge ${args.join(" ")}  (exit ${r.exitCode})\n${text}`);
-  return { code: r.exitCode, text };
+// Async on purpose: the fake Orbit runs in this process, so it must keep serving while the exe runs.
+async function bridge(...args: string[]) {
+  const p = Bun.spawn([exe, ...args], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  const text = stdout + stderr;
+  console.log(`\n> torbit-bridge ${args.join(" ")}  (exit ${code})\n${text}`);
+  return { code, text };
 }
 
 let failed = "";
@@ -34,21 +36,21 @@ const expect = (cond: boolean, what: string) => {
 };
 
 try {
-  expect(bridge("version", "--short").code === 0, "version");
-  const setup = bridge("setup", "--no-task", "--server", `http://localhost:${server.port}`, "--workspace", "smoke");
+  expect((await bridge("version", "--short")).code === 0, "version");
+  const setup = await bridge("setup", "--no-task", "--server", `http://localhost:${server.port}`, "--workspace", "smoke");
   expect(setup.text.includes("Enrolled."), "setup enrolls with a CNG key");
-  const doctor = bridge("doctor");
+  const doctor = await bridge("doctor");
   expect(/\[ ok \] Signing key\s+.*signs and verifies/.test(doctor.text), "doctor: the CNG key signs and verifies");
   expect(/\[ ok \] Orbit server/.test(doctor.text), "doctor: reaches the fake Orbit");
 
-  const install = bridge("install", "--no-start");
+  const install = await bridge("install", "--no-start");
   expect(install.code === 0, "install registers the logon task");
   const query = Bun.spawnSync(["schtasks.exe", "/Query", "/TN", "Torbit Bridge", "/XML"], { stdout: "pipe" }).stdout.toString();
   console.log(query);
   expect(query.includes("<LogonTrigger>") && query.includes("run --background"), "the task has a logon trigger and runs `run --background`");
-  expect(bridge("doctor").text.includes('[ ok ] Logon task'), "doctor sees the logon task");
+  expect((await bridge("doctor")).text.includes('[ ok ] Logon task'), "doctor sees the logon task");
 
-  const uninstall = bridge("uninstall", "--purge");
+  const uninstall = await bridge("uninstall", "--purge");
   expect(uninstall.code === 0, "uninstall --purge");
   const gone = Bun.spawnSync(["schtasks.exe", "/Query", "/TN", "Torbit Bridge"], { stdout: "ignore", stderr: "ignore" }).exitCode;
   expect(gone !== 0, "the logon task is removed");

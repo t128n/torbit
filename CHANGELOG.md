@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1+5
 
 - Rewrite the Outlook bridge in TypeScript (`bridge/`), compiled with Bun into one
   `torbit-bridge.exe`, replacing `bridge.ps1` and `TorbitBridge.psm1`. Commands:

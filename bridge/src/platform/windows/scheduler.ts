@@ -99,8 +99,8 @@ export function createTask(s: TaskSpec): void {
 
 export interface TaskInfo { installed: boolean; enabled: boolean; command: string; arguments: string }
 
-export function queryTask(): TaskInfo {
-  const r = run(["schtasks.exe", "/Query", "/TN", TASK_NAME, "/XML"]);
+export function queryNamedTask(name: string): TaskInfo {
+  const r = run(["schtasks.exe", "/Query", "/TN", name, "/XML"]);
   if (r.code !== 0) return { installed: false, enabled: false, command: "", arguments: "" };
   const tag = (name: string) => new RegExp(`<${name}>([^<]*)</${name}>`).exec(r.out)?.[1]?.trim() ?? "";
   const settings = /<Settings>[\s\S]*?<\/Settings>/.exec(r.out)?.[0] ?? "";
@@ -108,14 +108,20 @@ export function queryTask(): TaskInfo {
   return { installed: true, enabled, command: tag("Command"), arguments: tag("Arguments") };
 }
 
+export const queryTask = (): TaskInfo => queryNamedTask(TASK_NAME);
+
 export function deleteTask(): void {
   const r = run(["schtasks.exe", "/Delete", "/TN", TASK_NAME, "/F"]);
   if (r.code !== 0) throw new Error(`schtasks could not remove the task: ${(r.err || r.out).trim()}`);
 }
 
+export function startNamedTask(name: string): void {
+  const r = run(["schtasks.exe", "/Run", "/TN", name]);
+  if (r.code !== 0) throw new Error(`schtasks could not start "${name}": ${(r.err || r.out).trim()}`);
+}
+
 export function startTask(): void {
-  const r = run(["schtasks.exe", "/Run", "/TN", TASK_NAME]);
-  if (r.code !== 0) throw new Error(`schtasks could not start the task: ${(r.err || r.out).trim()}`);
+  startNamedTask(TASK_NAME);
 }
 
 /** Ends the running instance. A task that is not running is not an error. */

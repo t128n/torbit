@@ -1,7 +1,7 @@
 import type { Adapter, Platform } from "../core/types.ts";
 import { FileKeys } from "./fileKeys.ts";
+import { newMcpOutlook } from "./mcp/outlook.ts";
 import { CngKeys } from "./windows/cng.ts";
-import { OutlookAdapter } from "./windows/outlook.ts";
 import { hasEnvProxy, proxyFromSettings, readInternetSettings } from "./windows/proxy.ts";
 import { acquireRunLock } from "./windows/runlock.ts";
 
@@ -30,7 +30,7 @@ export function createPlatform(): Platform {
   return {
     supported: true,
     keys: () => keys,
-    newOutlook: async (opts) => new OutlookAdapter(opts?.timeoutMs),
+    newOutlook: async (opts) => newMcpOutlook(opts),
     proxyFor: (url) => (hasEnvProxy() ? undefined : proxyFromSettings(readInternetSettings(), url)),
     runLock: acquireRunLock,
   };

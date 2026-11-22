@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { parseDuration } from "../src/cli.ts";
-import { explainOutlookError } from "../src/platform/windows/outlook.ts";
 import { bypassed, parseRegQuery, proxyFromSettings } from "../src/platform/windows/proxy.ts";
 import { taskXml } from "../src/platform/windows/scheduler.ts";
 
@@ -30,12 +29,6 @@ HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settin
   expect(proxyFromSettings(s, new URL("https://a.corp.example"))).toBeUndefined();
   expect(proxyFromSettings({ ...s, enabled: false }, new URL("https://orbit.example.com"))).toBeUndefined();
   expect(bypassed("10.1.2.3", "10.*")).toBe(true);
-});
-
-test("COM errors say what to do", () => {
-  expect(explainOutlookError(-2147221164)).toContain("not installed"); // 0x80040154
-  expect(explainOutlookError(-2147024891)).toContain("blocked"); // 0x80070005
-  expect(explainOutlookError(1)).toContain("could not talk");
 });
 
 test("intervals", () => {

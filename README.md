@@ -100,7 +100,10 @@ ACLs, upgrade, and rollback procedure.
 The zip also contains the optional Outlook bridge (`bridge/torbit-bridge.exe`, a
 TypeScript program compiled with Bun into one exe, with `setup`, `doctor`,
 `install`, `uninstall`, `upgrade` and more), which delivers mail from classic
-Outlook on a user's PC to Orbit from a per-user Task Scheduler logon task. It is off until `ORBIT_MAIL_BRIDGE_REGISTRY_PATH` is set. See
+Outlook on a user's PC to Orbit from a per-user Task Scheduler logon task. It
+requires [`msoutlook-mcp`](https://github.com/t128n/msoutlook-mcp) 0.2.0 or later
+installed and running on the same PC (the bridge reads Outlook through its local
+daemon), and is off until `ORBIT_MAIL_BRIDGE_REGISTRY_PATH` is set. See
 [docs/bridge.md](docs/bridge.md).
 
 ## Releases

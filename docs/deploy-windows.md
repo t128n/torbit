@@ -103,6 +103,30 @@ setting, the installer adds `ORBIT_APP_KEY_FILE` for the default path. Back the
 key up immediately: it is not in the database backup, and a restored database
 cannot decrypt saved secrets without it.
 
+## Offline and air-gapped installs
+
+The optional Outlook bridge is not self-contained: it drives classic Outlook
+through a local `msoutlook-mcp` daemon. For a disconnected deployment, mirror the
+**second artifact** next to the torbit release:
+
+- `msoutlook-mcp.exe` 0.2.0 or later (and any license/notice files it ships with).
+
+Nothing may be fetched from GitHub at install time. Copy the dependency artifact
+to the same file share or media as `torbit-windows-x86_64-<version>.zip`, then on
+each bridge PC:
+
+1. Install and configure `msoutlook-mcp` from the mirrored artifact
+   (`msoutlook-mcp setup`, keep sending off; `msoutlook-mcp install`).
+2. Verify `Invoke-RestMethod http://127.0.0.1:28471/health` reports
+   `"status": "connected"` (or the port in
+   `%LOCALAPPDATA%\msoutlook-mcp\config.json`).
+3. Run `torbit-bridge setup` / `install` from the torbit release.
+
+`torbit-bridge upgrade` never downloads or upgrades `msoutlook-mcp`; update both
+artifacts together when a new version is mirrored. An enrolled PC that already
+ran an earlier bridge also needs the dependency installed and running before the
+new bridge can deliver (see [bridge.md](bridge.md#moving-from-an-earlier-bridge)).
+
 ## Configuration
 
 `C:\ProgramData\Torbit\config\torbit.env` is read at every service start.

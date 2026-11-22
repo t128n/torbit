@@ -1,8 +1,8 @@
 # Bridge signing format (torbit-bridge-v1)
 
-This is the contract between the Outlook bridge (`bridge/`, Go) and the Orbit server patch.
+This is the contract between the Outlook bridge (`bridge/`, TypeScript) and the Orbit server patch.
 Both sides must pass `tests/bridge-vectors.json`. The script side is checked by
-`bridge/internal/core` (`go test ./...`, Go `crypto/ecdsa`).
+`bridge/test/signing.test.ts` (`bun test`, Node `crypto`).
 
 ## Request
 
@@ -162,4 +162,4 @@ replayed nonce, oversized body, feature off, 503) are listed in
 
 To regenerate: `node tests/generate-bridge-vectors.mjs > tests/bridge-vectors.json`
 (this creates a new key and new signatures). To verify:
-`cd bridge && go test ./internal/core -run TestSigningVectors`.
+`cd bridge && bun test test/signing.test.ts`.

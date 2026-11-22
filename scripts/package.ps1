@@ -39,7 +39,7 @@ foreach ($file in @("install.ps1", "uninstall.ps1", "torbit.env.example", "READM
     Copy-Item (Join-Path $windows $file) (Join-Path $stage $file)
 }
 
-# The Outlook bridge ships as one Go binary (scripts/build-bridge.ps1), also as a standalone release asset
+# The Outlook bridge ships as one Bun-compiled binary (scripts/build-bridge.ps1), also as a standalone release asset
 # that `torbit-bridge upgrade` downloads.
 $bridgeExe = Join-Path $script:TorbitRoot "bridge/dist/torbit-bridge.exe"
 if (-not (Test-Path $bridgeExe)) {

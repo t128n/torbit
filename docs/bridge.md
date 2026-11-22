@@ -1,10 +1,12 @@
 # Outlook bridge
 
-The bridge is `torbit-bridge.exe`, a small Go program that runs on a user's
-Windows PC. It reads mail from classic desktop Outlook through COM and delivers
-each message to Orbit over HTTPS, signed with a key that stays on the PC. Mail
-then shows up in that user's personal Orbit mailbox. It needs no Microsoft 365
-app registration and no runtime other than Windows itself.
+The bridge is `torbit-bridge.exe`, one executable (TypeScript compiled with Bun)
+that runs on a user's Windows PC. It reads mail from classic desktop Outlook
+through COM and delivers each message to Orbit over HTTPS, signed with a key
+that stays on the PC. Mail then shows up in that user's personal Orbit mailbox.
+It needs no Microsoft 365 app registration, no installer and no runtime other
+than Windows itself (it talks to Outlook through the Windows PowerShell that
+ships with Windows).
 
 The message format and signature are in [bridge-signing.md](bridge-signing.md).
 
@@ -25,9 +27,10 @@ member of the workspace.
 .\torbit-bridge.exe setup
 ```
 
-`setup` enrolls the PC, checks Outlook, installs the Windows service (one UAC
-prompt) and ends with the same report as `doctor`. Keep Outlook open and
-signed in; the bridge reads it while you are signed in to Windows.
+`setup` enrolls the PC, checks Outlook, registers the logon task and ends with
+the same report as `doctor`. No administrator rights and no UAC prompt are
+needed. Keep Outlook open and signed in; the bridge reads it while you are
+signed in to Windows.
 
 ## Turn it on (administrator)
 
@@ -47,19 +50,20 @@ service after you change the setting.
 
 ## How it runs
 
-`install` registers the Windows service **TorbitBridge** (automatic, delayed
-start, restarted on failure). A service lives in session 0 and classic Outlook
-only works inside a signed-in user's own session, so the service does not read
-Outlook itself. It watches the Windows sessions and keeps one worker
-(`torbit-bridge run`) running **as that user, in that user's session, not
-elevated**, the same way Outlook runs. When the user signs out the worker ends;
-when they sign in (or unlock) it starts again. The service binary is copied to
-`%ProgramFiles%\Torbit\Bridge\torbit-bridge.exe`, where standard users cannot
-change it, because the service runs as SYSTEM.
+`install` copies the program to `%LOCALAPPDATA%\Torbit\Bridge\bin\torbit-bridge.exe`
+and registers a Task Scheduler task named **Torbit Bridge** for the current user:
+it starts 15 seconds after that user signs in, runs `torbit-bridge run --background`
+in the user's own session (not elevated, the same way Outlook runs), has no time
+limit, allows one instance and is restarted up to three times if it crashes.
+Classic Outlook only works inside a signed-in user's own session, which is why this
+is a logon task and not a Windows service. When the user signs out the worker ends;
+at the next sign-in it starts again. The task is per user, so no administrator
+rights are needed to install, upgrade or remove it. It starts the program without a
+console window.
 
-The key and the device config belong to the user who enrolled, so the service
-delivers for exactly one Windows user: the one who ran `install` (or
-`--user`). On a shared PC, install it for the person whose mailbox it is.
+The key and the device config belong to the user who enrolled, so the task delivers
+for exactly one Windows user: the one who ran `install`. On a shared PC, install it
+for the person whose mailbox it is.
 
 ## Commands
 
@@ -69,29 +73,26 @@ torbit-bridge <command> [flags]       torbit-bridge <command> -h   for flags
 
 | Command | What it does |
 |---|---|
-| `setup` | Guided first run: enroll, check Outlook, install the service, run `doctor`. |
+| `setup` | Guided first run: enroll, check Outlook, register the logon task, run `doctor`. |
 | `doctor` | Checks everything and says how to fix each problem. Exit code 1 on a failure. |
-| `install` | Copies the binary to Program Files, registers and starts the service. Safe to repeat. |
-| `uninstall` | Stops and removes the service and the installed binary. `--purge` also deletes the local key, config and state. |
+| `install` | Copies the program to `%LOCALAPPDATA%\Torbit\Bridge\bin`, registers the logon task and starts it. Safe to repeat. |
+| `uninstall` | Stops and removes the logon task and the installed copy. `--purge` also deletes the local key, config and state. |
 | `upgrade` | Updates to the latest release (`--check` only looks; `--version X` picks one). |
-| `enroll` | Registers this PC as a device (what `setup` does first). |
 | `revoke` | Revokes the device in Orbit, then deletes the local key, config and state. |
-| `status` | Device, key, last run, counts, service state, version. |
-| `run` | Delivers mail in the foreground. The service runs this for you. |
+| `status` | Device, key, last run, counts, logon task state, version. |
+| `run` | Delivers mail in the foreground. The logon task runs this for you. |
 | `backfill` | Delivers inbox mail since a date, once. |
-| `start` / `stop` | Start or stop the service. |
-| `logs` | Shows the end of `bridge.log` (`--service` for the service log). |
+| `start` / `stop` | Start the task now / stop the running bridge until the next sign-in. |
+| `logs` | Shows the end of `bridge.log`. |
 | `version` | Prints the version. |
 
-`install`, `uninstall`, `start`, `stop` and `upgrade` need administrator
-rights. Run from a normal terminal, they ask for them with one UAC prompt and
-print what the elevated process did.
+None of the commands need administrator rights; run them from a normal terminal as
+the user whose Outlook is read.
 
-### setup / enroll
+### setup
 
 ```text
-torbit-bridge setup [--server https://orbit.example.com] [--workspace <id>] [--no-service] [--force]
-torbit-bridge enroll --server https://orbit.example.com --workspace <id>
+torbit-bridge setup [--server https://orbit.example.com] [--workspace <id>] [--no-task] [--force] [--interval 60]
 ```
 
 Missing values are asked for; the token is typed without echo. For scripts, pass
@@ -111,13 +112,14 @@ Run it first when something is wrong. It checks: the bridge folder, enrollment,
 that the signing key exists and produces a signature that verifies, that Orbit
 answers (through your proxy settings) and that the PC clock is within the 5
 minutes Orbit allows, items waiting or skipped, the last run, that classic
-Outlook answers, and the service (installed, running, automatic start, binary
-version, right user). Each warning or failure has a hint.
+Outlook answers, and the logon task (registered, enabled, installed copy runs and
+has this version, worker running; also a leftover service from the Go version).
+Each warning or failure has a hint.
 
 ### run
 
 ```text
-torbit-bridge run [--interval 60]
+torbit-bridge run [--interval 60] [--background]
 ```
 
 Stays running. It sweeps the Outlook inbox (the Inbox folder only, not
@@ -133,8 +135,8 @@ answers 401 or 413 (or another 4xx), the item is recorded as skipped and not
 sent again. Attachments are read from Outlook one item at a time, only when the
 item is sent; an item that Outlook reports as larger than 2 MiB is skipped
 (413, too large) without reading its attachments. Only one `run` can be active
-per Windows session, so a manual `run` next to the service stops with "already
-running". The log is `bridge.log` in `%LOCALAPPDATA%\Torbit\Bridge`; it has
+per Windows session, so a manual `run` next to the logon task stops with "already
+running" (stop the task's worker first with `torbit-bridge stop`). The log is `bridge.log` in `%LOCALAPPDATA%\Torbit\Bridge`; it has
 events and ids only, never message text.
 
 ### backfill
@@ -157,7 +159,7 @@ Marks this device as revoked in Orbit (this needs your Orbit credential, as for
 refuses all later deliveries from the device. If the server call fails, nothing
 is removed locally. Use `--local-only` to remove only the local data, for example
 when the device is already revoked in Orbit. To stop a lost PC, revoke its
-device in Orbit. `revoke` leaves the service installed; remove it with
+device in Orbit. `revoke` leaves the logon task installed; remove it with
 `uninstall`.
 
 ### upgrade
@@ -169,9 +171,9 @@ torbit-bridge upgrade [--check] [--version <v>]
 Looks up the newest GitHub release of this project, downloads
 `torbit-bridge-windows-x86_64-<version>.exe`, checks its SHA-256 against the
 release's `SHA256SUMS`, runs it once to make sure it starts and reports the
-expected version, and only then stops the service, swaps the binary in Program
-Files (and the copy you ran), and starts the service again. Enrollment, key and
-state are untouched. If anything fails before the swap, nothing changes. It
+expected version, and only then stops the worker, swaps the installed copy (and
+the copy you ran), and starts the task again. Enrollment, key and state are
+untouched. If anything fails before the swap, nothing changes. It
 downloads through your proxy settings. To go back, `upgrade --version <older>`.
 
 ### uninstall
@@ -180,24 +182,31 @@ downloads through your proxy settings. To go back, `upgrade --version <older>`.
 torbit-bridge uninstall [--purge]
 ```
 
-Removes the service, the Program Files copy and any logon task left by the old
-PowerShell bridge. The device stays enrolled unless you pass `--purge` (local
+Removes the logon task and the installed copy. The device stays enrolled unless you pass `--purge` (local
 data only; it does not tell Orbit, so use `revoke` first to also remove the
 device in Orbit).
 
-## Moving from the PowerShell bridge
+## Moving from an earlier bridge
 
-Earlier versions were `bridge.ps1`. The Go bridge reads the same
-`config.json`, `state.json` and key store entry, so an enrolled PC
-needs no re-enrollment (the server must be the build with the `torbit-bridge-v1`
-wire format; a bridge folder still named `Worbit\Bridge` has to be moved to
-`%LOCALAPPDATA%\Torbit\Bridge`) and delivered mail is not sent again: copy
-`torbit-bridge.exe` over, run `torbit-bridge install`, which also removes the
-old "Torbit Bridge" logon task. Differences: the bridge no longer listens for
-Outlook's new-mail event, it sweeps every 60 seconds instead (set `--interval`
-to change that); and it follows the proxy configured in Windows settings or
-`HTTPS_PROXY`, not a PAC script or sign-in with the Windows account (see
-[Proxy](#proxy)).
+The PowerShell bridge (`bridge.ps1`) and the short-lived Go bridge used the same
+`config.json`, `state.json` and key store entry, so an enrolled PC needs no
+re-enrollment (the server must be the build with the `torbit-bridge-v1` wire format;
+a bridge folder still named `Worbit\Bridge` has to be moved to
+`%LOCALAPPDATA%\Torbit\Bridge`) and delivered mail is not sent again. Copy
+`torbit-bridge.exe` over and run `torbit-bridge install`. Then:
+
+- The Go version ran as a Windows service named `TorbitBridge`. Remove it once, from
+  an administrator prompt: `sc.exe stop TorbitBridge & sc.exe delete TorbitBridge`
+  (`install` and `doctor` tell you when it is still there, and delete the old
+  `%ProgramFiles%\Torbit\Bridge` copy by hand if you want it gone). Both versions use the
+  same run lock, so they never deliver at the same time.
+- The old PowerShell bridge's logon task was also called "Torbit Bridge"; `install`
+  replaces it with the new one.
+
+Differences from the PowerShell bridge: the bridge no longer listens for Outlook's
+new-mail event, it sweeps every 60 seconds instead (set `--interval` to change
+that); and it follows the proxy configured in Windows settings or `HTTPS_PROXY`,
+not a PAC script or sign-in with the Windows account (see [Proxy](#proxy)).
 
 ## Manual COM verification checklist
 
@@ -205,15 +214,17 @@ Automated tests use a fake Outlook. Check the real thing once on each PC
 configuration before you roll out:
 
 1. Classic Outlook is installed, open and signed in.
-2. `enroll` finishes and `status` shows the device and key location.
-3. Send yourself a plain text mail and a mail with an attachment. Run `torbit-bridge run` (or wait a minute with the service running).
+2. `setup` finishes and `status` shows the device and key location.
+3. Send yourself a plain text mail and a mail with an attachment. Run `torbit-bridge run` (or wait a minute with the logon task running).
    Both appear in the Orbit mailbox, with the attachment intact.
 4. Run `torbit-bridge run` again. No duplicates appear.
 5. Run `backfill` with a date a few days back. Older mail appears once.
-6. Stop the Orbit service, run `run`, start the service, run `run`. The mail
-   arrives once after the service is back.
-7. Close Outlook and run `run`. The error text says what to do.
-8. `revoke`. A later `run` fails with a message to enroll again.
+6. Stop the Orbit service, run `run`, start the Orbit service, run `run`. The mail
+   arrives once after Orbit is back.
+7. Run `install`, sign out and in again (or `torbit-bridge start`). `doctor` shows the
+   logon task and a running worker, and a new mail arrives without a console window.
+8. Close Outlook and run `run`. The error text says what to do.
+9. `revoke`. A later `run` fails with a message to enroll again.
 
 ## When Outlook automation is blocked (for IT)
 
@@ -222,7 +233,11 @@ bridge from using Outlook, the COM call was refused. Common causes: a policy
 that blocks programmatic access, a security product that blocks scripts from
 automating Outlook, or Outlook running at a different privilege level than the
 program (one elevated, one not). Run both as the same normal user. Allow
-`torbit-bridge.exe` to use Outlook automation for the users who need the bridge. The
+`torbit-bridge.exe` and Windows PowerShell (which the bridge starts to reach
+Outlook) to use Outlook automation for the users who need the bridge. The helper
+needs PowerShell's FullLanguage mode: with AppLocker or WDAC in "constrained
+language" mode, Outlook's COM object cannot be created and `doctor` reports that
+Outlook is blocked. The
 error `Outlook (classic desktop version) is not installed` means new Outlook or
 no Outlook; the bridge does not support those.
 
@@ -233,6 +248,6 @@ the signed-in user has configured in Windows (Settings, Network, Proxy; the
 `ProxyServer` and `ProxyOverride` values). It does not run PAC/WPAD scripts and
 cannot sign in to an authenticating proxy with your Windows account; for those,
 ask for a proxy exception for the Orbit host, or set `HTTPS_PROXY` for the user
-(`setx HTTPS_PROXY http://user:pass@proxy:8080`, then restart the service
-worker). If Orbit is not reachable, `doctor` says so with the error. Server URLs
+(`setx HTTPS_PROXY http://user:pass@proxy:8080`, then `torbit-bridge stop` and
+`torbit-bridge start`). If Orbit is not reachable, `doctor` says so with the error. Server URLs
 must use HTTPS; plain HTTP works only for `localhost`.

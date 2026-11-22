@@ -42,6 +42,15 @@ const mcp = Bun.serve({
 writeFileSync(join(mcpHome, "config.json"), JSON.stringify({ version: 1, port: mcp.port }));
 writeFileSync(join(mcpHome, "token"), "smoke-mcp-token\n");
 
+// install ensures the dependency's logon task exists. A runner has no real msoutlook-mcp exe,
+// so register a harmless task with the same name; the fake daemon stays the /health source.
+const MCP_TASK = "MSOutlook MCP";
+Bun.spawnSync(["schtasks.exe", "/Delete", "/TN", MCP_TASK, "/F"], { stdout: "ignore", stderr: "ignore" });
+const mcpTask = Bun.spawnSync(
+  ["schtasks.exe", "/Create", "/TN", MCP_TASK, "/SC", "ONLOGON", "/TR", "cmd.exe /d /c exit 0", "/F"],
+  { stdout: "pipe", stderr: "pipe" },
+);
+
 const env = {
   ...process.env,
   TORBIT_BRIDGE_HOME: home,
@@ -82,6 +91,7 @@ try {
   const doctor = await bridge("doctor");
   expect(/\[ ok \] Signing key\s+.*signs and verifies/.test(doctor.text), "doctor: the CNG key signs and verifies");
   expect(/\[ ok \] Orbit server/.test(doctor.text), "doctor: reaches the fake Orbit");
+  expect(mcpTask.exitCode === 0, "the fake MSOutlook MCP logon task is registered");
 
   const install = await bridge("install", "--no-start");
   expect(install.code === 0, "install registers the logon task");
@@ -98,6 +108,7 @@ try {
   server.stop(true);
   mcp.stop(true);
   Bun.spawnSync(["schtasks.exe", "/Delete", "/TN", "Torbit Bridge", "/F"], { stdout: "ignore", stderr: "ignore" });
+  Bun.spawnSync(["schtasks.exe", "/Delete", "/TN", MCP_TASK, "/F"], { stdout: "ignore", stderr: "ignore" });
   try { rmSync(home, { recursive: true, force: true }); } catch { /* the removed exe may still be exiting */ }
   try { rmSync(mcpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }

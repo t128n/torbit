@@ -21,17 +21,14 @@ jobs:
         working-directory: bridge
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: oven-sh/setup-bun@v2
         with:
-          go-version-file: bridge/go.mod
-          cache-dependency-path: bridge/go.sum
-      - run: test -z "$(gofmt -l .)"
-      - run: go vet ./...
-      - run: go test ./...
-      - name: Cross-vet the Windows code
-        run: |
-          GOOS=windows GOARCH=amd64 go vet ./...
-          GOOS=windows GOARCH=arm64 go vet ./...
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - name: Cross-compile the Windows executable
+        run: bun run build
 
   windows:
     runs-on: windows-latest
@@ -87,20 +84,29 @@ jobs:
         shell: pwsh
         run: ./tests/smoke.ps1
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: bridge/go.mod
-          cache-dependency-path: bridge/go.sum
-
       - name: Build and test the Outlook bridge
         shell: pwsh
         run: |
           Push-Location bridge
-          try { go test ./...; if ($LASTEXITCODE -ne 0) { throw "go test failed" } } finally { Pop-Location }
+          try {
+            bun install --frozen-lockfile
+            if ($LASTEXITCODE -ne 0) { throw "bun install failed" }
+            bun test
+            if ($LASTEXITCODE -ne 0) { throw "bridge tests failed" }
+          } finally { Pop-Location }
           ./scripts/build-bridge.ps1
           & ./bridge/dist/torbit-bridge.exe version
           & ./bridge/dist/torbit-bridge.exe help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "torbit-bridge help failed" }
+
+      - name: Smoke test the bridge (CNG key, logon task)
+        shell: pwsh
+        run: |
+          Push-Location bridge
+          try {
+            bun run scripts/smoke.ts dist/torbit-bridge.exe
+            if ($LASTEXITCODE -ne 0) { throw "bridge smoke test failed" }
+          } finally { Pop-Location }
 
       - name: Package
         shell: pwsh

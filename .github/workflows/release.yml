@@ -71,17 +71,26 @@ jobs:
         shell: pwsh
         run: ./tests/smoke.ps1
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: bridge/go.mod
-          cache-dependency-path: bridge/go.sum
-
       - name: Test and build the Outlook bridge
         shell: pwsh
         run: |
           Push-Location bridge
-          try { go test ./...; if ($LASTEXITCODE -ne 0) { throw "go test failed" } } finally { Pop-Location }
+          try {
+            bun install --frozen-lockfile
+            if ($LASTEXITCODE -ne 0) { throw "bun install failed" }
+            bun test
+            if ($LASTEXITCODE -ne 0) { throw "bridge tests failed" }
+          } finally { Pop-Location }
           ./scripts/build-bridge.ps1
+
+      - name: Smoke test the bridge (CNG key, logon task)
+        shell: pwsh
+        run: |
+          Push-Location bridge
+          try {
+            bun run scripts/smoke.ts dist/torbit-bridge.exe
+            if ($LASTEXITCODE -ne 0) { throw "bridge smoke test failed" }
+          } finally { Pop-Location }
 
       - name: Package
         shell: pwsh

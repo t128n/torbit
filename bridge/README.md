@@ -1,22 +1,26 @@
 # torbit-bridge
 
-Go source of the Outlook bridge. User documentation: [docs/bridge.md](../docs/bridge.md);
-wire format: [docs/bridge-signing.md](../docs/bridge-signing.md).
+TypeScript source of the Outlook bridge, compiled with [Bun](https://bun.sh) into one `torbit-bridge.exe`.
+User documentation: [docs/bridge.md](../docs/bridge.md); wire format: [docs/bridge-signing.md](../docs/bridge-signing.md).
 
 ```text
-main.go, commands.go, upgrade.go   CLI: setup doctor install uninstall upgrade enroll revoke status run backfill start stop logs
-internal/core                      portable: config/state, signing, MIME rebuild, delivery, sweep, enroll/revoke, doctor, update
-internal/platform                  Windows: CNG key, Outlook COM (go-ole), service + session launcher, proxy, UAC relaunch
-                                   other OS: development stubs (file key, no Outlook, no service)
+src/main.ts, src/cli.ts           CLI entry: setup doctor install uninstall upgrade run backfill status revoke start stop logs version
+src/commands/                     the commands (lifecycle: setup/install/uninstall/upgrade; ops: run/backfill/status/...; checks: doctor)
+src/core/                         portable: config/state, signing, MIME rebuild, delivery, sweep, enroll/revoke, doctor, update
+src/platform/windows/             CNG key (bun:ffi -> ncrypt.dll), Outlook (PowerShell COM helper), Task Scheduler (schtasks), proxy, run lock
+src/platform/fileKeys.ts          other OS: development stub (file key, no Outlook, no task scheduler)
 ```
 
 ```bash
 cd bridge
-go test ./...                          # runs on Linux; includes tests/bridge-vectors.json
-GOOS=windows go vet ./...              # type-checks the Windows code
-GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=$(cat ../VERSION)" -o dist/torbit-bridge.exe .
+bun install
+bun test                  # runs anywhere; includes tests/bridge-vectors.json
+bun run typecheck
+bun run build             # dist/torbit-bridge.exe; cross-compiles from Linux/macOS too
+bun src/main.ts doctor    # run from source (Windows: needs classic Outlook for the Outlook check)
 ```
 
-The Windows-only code (CNG, COM, service, elevation) cannot run in Linux CI. It
-compiles and vets there; run `torbit-bridge doctor` and the checklist in
-docs/bridge.md on a real PC before a release.
+The Windows-only parts (CNG, Outlook, Task Scheduler) cannot run in Linux CI. `bun test` covers their pure
+logic (task XML, proxy parsing, error mapping); CI runs `scripts/smoke.ts` against the built exe on a Windows
+runner (CNG key, enrollment against a fake Orbit, logon task register/remove). The Outlook helper needs a real
+PC: run `torbit-bridge doctor` and the checklist in docs/bridge.md before a release.

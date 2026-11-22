@@ -2,15 +2,19 @@
 
 ## Unreleased
 
-- Rewrite the Outlook bridge in Go (`bridge/`, `torbit-bridge.exe`) with native
-  Windows service support, replacing `bridge.ps1` and `TorbitBridge.psm1`. New
-  commands: `setup` (guided enroll + Outlook check + service install), `doctor`,
-  `install`, `uninstall`, `upgrade` (checksum-verified self-update from the
-  release), `start`, `stop`, `logs`; `enroll`, `run`, `backfill`, `status` and
-  `revoke` stay. The service starts the worker in the signed-in user's session,
-  because classic Outlook cannot be automated from session 0, and replaces the
-  logon scheduled task. It keeps the same `config.json`, `state.json`, CNG key
-  and wire format, so enrolled PCs need no re-enrollment.
+- Rewrite the Outlook bridge in TypeScript (`bridge/`), compiled with Bun into one
+  `torbit-bridge.exe`, replacing `bridge.ps1` and `TorbitBridge.psm1`. Commands:
+  `setup` (guided enroll + Outlook check + logon task), `doctor`, `install`,
+  `uninstall`, `upgrade` (checksum-verified self-update from the release), `run`,
+  `backfill`, `status`, `revoke`, `start`, `stop`, `logs`. `install` copies the exe to
+  `%LOCALAPPDATA%\Torbit\Bridge\bin` and registers a per-user Task Scheduler logon
+  task ("Torbit Bridge") that runs in the signed-in user's own session, where classic
+  Outlook works; no administrator rights, no UAC prompt, no Windows service.
+  It keeps the same `config.json`, `state.json`, CNG key and wire format, so enrolled PCs
+  need no re-enrollment. Outlook is driven through a hidden Windows PowerShell helper, so
+  the exe is about 110 MB (it carries the Bun runtime). `enroll` is now `setup`
+  (`setup --force` enrolls again). PCs that ran the short-lived Go service bridge: remove the old
+  service once with `sc.exe stop TorbitBridge & sc.exe delete TorbitBridge` (`doctor` says so).
 - **Breaking:** the bridge uses `torbit-bridge-v1` and `X-Torbit-*` (patch 0006, the
   Go bridge, vectors and docs); no `worbit` names remain in the bridge. Upgrade the
   server and all bridge PCs together; an old bridge gets 401 until upgraded. Devices
@@ -19,7 +23,7 @@
 - The bridge sweeps every 60 seconds instead of listening for Outlook's new-mail
   event, and follows `HTTPS_PROXY` or the manual Windows proxy (no PAC scripts).
 - Releases carry `torbit-bridge-windows-x86_64-<version>.exe` and its checksum in
-  `SHA256SUMS`; `scripts/build-bridge.ps1` builds it, and CI tests the Go code.
+  `SHA256SUMS`; `scripts/build-bridge.ps1` builds it, and CI tests and smoke-tests it on Windows.
 
 ## 0.4.1+3
 

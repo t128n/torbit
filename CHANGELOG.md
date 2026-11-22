@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.1+6
+
+- Replace the bridge's own PowerShell/COM Outlook helper with a client for the
+  local [`msoutlook-mcp`](https://github.com/t128n/msoutlook-mcp) daemon (MCP
+  Streamable HTTP). The bridge now makes one `read_mail` call per item for the
+  body, transport headers, Content-ID/MIME type and attachment bytes, and drains
+  `list_mail` cursor pages oldest-first. The PC has one Outlook automation stack
+  instead of two, and agent clients and the bridge read the same session.
+- **New runtime dependency:** `msoutlook-mcp` 0.2.0 or later must be installed,
+  its daemon running and its logon task enabled. `setup` verifies it before
+  enrolling, `install` ensures/starts its task, `doctor` checks it (health,
+  token, state, version floor, task), and `upgrade` warns but never upgrades it.
+  `uninstall` removes only the bridge's task. `setup` now has a dependency step.
+- Missing, stopped or too-old `msoutlook-mcp` fails `doctor` with the fix; a
+  daemon in its `error` state or a 401 fails the sweep instead of silently
+  skipping mail. A skipped attachment (`too_large`/`total_cap`/`unavailable`)
+  records the whole item as 413.
+- Wire format, enrollment, CNG key, state and `torbit-bridge-v1` are unchanged;
+  an enrolled PC needs no re-enrollment, but must install the dependency first.
+  `docs/bridge.md`, `docs/deploy-windows.md`, `README.md` and `bridge/README.md`
+  describe the dependency, the second logon task and offline mirroring.
+
 ## 0.4.1+5
 
 - Rewrite the Outlook bridge in TypeScript (`bridge/`), compiled with Bun into one

@@ -2,35 +2,65 @@
 
 The bridge is `torbit-bridge.exe`, one executable (TypeScript compiled with Bun)
 that runs on a user's Windows PC. It reads mail from classic desktop Outlook
-through COM and delivers each message to Orbit over HTTPS, signed with a key
-that stays on the PC. Mail then shows up in that user's personal Orbit mailbox.
-It needs no Microsoft 365 app registration, no installer and no runtime other
-than Windows itself (it talks to Outlook through the Windows PowerShell that
-ships with Windows).
+through the local [`msoutlook-mcp`](https://github.com/t128n/msoutlook-mcp)
+daemon and delivers each message to Orbit over HTTPS, signed with a key that
+stays on the PC. Mail then shows up in that user's personal Orbit mailbox. It
+needs no Microsoft 365 app registration and no installer for itself.
 
 The message format and signature are in [bridge-signing.md](bridge-signing.md).
 
 Requirements: Windows 10/11 or Windows Server 2016+ (x86-64), classic Outlook
-(not "new Outlook") signed in to the mailbox, and an Orbit account that is a
-member of the workspace.
+(not "new Outlook") signed in to the mailbox, an Orbit account that is a member
+of the workspace, and **`msoutlook-mcp` 0.2.0 or later installed, its daemon
+running and its logon task enabled** (it holds the Outlook session the bridge
+reads). Classic Outlook must be signed in and open for both.
+
+## Install the dependency first
+
+The bridge does not drive Outlook itself. `msoutlook-mcp` owns the single COM
+session, and both the bridge and any agent client read the same mailbox through
+it. Install and verify it **before** `torbit-bridge setup`:
+
+1. Install `msoutlook-mcp` 0.2.0 or later from its release (copy
+   `msoutlook-mcp.exe` somewhere permanent, or use its zip).
+2. Run `msoutlook-mcp setup`. Leave sending off and do not change the allowlist;
+   the bridge only reads mail. Accept its logon task.
+3. Run `msoutlook-mcp install` so its daemon starts at sign-in.
+4. Check it is up, from the same user session:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:28471/health
+```
+
+The answer must have `"status": "connected"`. `waiting_for_outlook` means
+Outlook is closed or still starting; `error` means COM is blocked (see
+[When Outlook automation is blocked](#when-outlook-automation-is-blocked-for-it)).
+If `setup` picked another port, read it from
+`%LOCALAPPDATA%\msoutlook-mcp\config.json`. `MSOUTLOOK_MCP_HOME` is honoured when
+set. `msoutlook-mcp doctor` prints the same checks with the fix for each.
+
+`torbit-bridge setup` verifies the dependency and stops before enrolling when it
+is missing. The bridge never installs, upgrades or configures `msoutlook-mcp`;
+`upgrade` only tells you when its version is too old.
 
 ## Quick start (user)
 
 1. Ask the Orbit administrator to [turn the feature on](#turn-it-on-administrator)
    and for the server URL and your workspace id.
-2. Get a session token: sign in to Orbit, then copy the value of the
+2. Install and verify `msoutlook-mcp` as described above.
+3. Get a session token: sign in to Orbit, then copy the value of the
    `__Host-orbit_session` cookie (or use an API token).
-3. Open a terminal **as yourself** (not as administrator), in the `bridge`
+4. Open a terminal **as yourself** (not as administrator), in the `bridge`
    folder of the release zip, and run:
 
 ```text
 .\torbit-bridge.exe setup
 ```
 
-`setup` enrolls the PC, checks Outlook, registers the logon task and ends with
-the same report as `doctor`. No administrator rights and no UAC prompt are
-needed. Keep Outlook open and signed in; the bridge reads it while you are
-signed in to Windows.
+`setup` checks `msoutlook-mcp`, enrolls the PC, checks Outlook, registers the
+logon task and ends with the same report as `doctor`. No administrator rights
+and no UAC prompt are needed. Keep Outlook open and signed in (minimize it);
+the bridge reads it while you are signed in to Windows.
 
 ## Turn it on (administrator)
 
@@ -50,16 +80,22 @@ service after you change the setting.
 
 ## How it runs
 
-`install` copies the program to `%LOCALAPPDATA%\Torbit\Bridge\bin\torbit-bridge.exe`
-and registers a Task Scheduler task named **Torbit Bridge** for the current user:
-it starts 15 seconds after that user signs in, runs `torbit-bridge run --background`
-in the user's own session (not elevated, the same way Outlook runs), has no time
-limit, allows one instance and is restarted up to three times if it crashes.
-Classic Outlook only works inside a signed-in user's own session, which is why this
-is a logon task and not a Windows service. When the user signs out the worker ends;
-at the next sign-in it starts again. The task is per user, so no administrator
-rights are needed to install, upgrade or remove it. It starts the program without a
-console window.
+Two per-user Task Scheduler tasks, both in the signed-in user's own session
+(not elevated, the same way Outlook runs):
+
+- **MSOutlook MCP** belongs to `msoutlook-mcp`. It starts that daemon 15 seconds
+  after sign-in and keeps the Outlook connection.
+- **Torbit Bridge** belongs to this bridge. `install` copies the program to
+  `%LOCALAPPDATA%\Torbit\Bridge\bin\torbit-bridge.exe`, then registers the task
+  for the current user. It starts 15 seconds after that user signs in, runs
+  `torbit-bridge run --background`, has no time limit, allows one instance and
+  is restarted up to three times if it crashes.
+
+Classic Outlook only works inside a signed-in user's own session, which is why
+both are logon tasks and not Windows services. When the user signs out both end;
+at the next sign-in both start again. `torbit-bridge install` ensures the
+`msoutlook-mcp` task is registered and starts it as well; `uninstall` removes
+only **Torbit Bridge** and leaves `msoutlook-mcp` installed.
 
 The key and the device config belong to the user who enrolled, so the task delivers
 for exactly one Windows user: the one who ran `install`. On a shared PC, install it
@@ -73,11 +109,11 @@ torbit-bridge <command> [flags]       torbit-bridge <command> -h   for flags
 
 | Command | What it does |
 |---|---|
-| `setup` | Guided first run: enroll, check Outlook, register the logon task, run `doctor`. |
-| `doctor` | Checks everything and says how to fix each problem. Exit code 1 on a failure. |
-| `install` | Copies the program to `%LOCALAPPDATA%\Torbit\Bridge\bin`, registers the logon task and starts it. Safe to repeat. |
-| `uninstall` | Stops and removes the logon task and the installed copy. `--purge` also deletes the local key, config and state. |
-| `upgrade` | Updates to the latest release (`--check` only looks; `--version X` picks one). |
+| `setup` | Guided first run: verify `msoutlook-mcp`, enroll, check Outlook, register the logon task, run `doctor`. |
+| `doctor` | Checks everything, including `msoutlook-mcp`, and says how to fix each problem. Exit code 1 on a failure. |
+| `install` | Copies the program to `%LOCALAPPDATA%\Torbit\Bridge\bin`, registers the logon task, ensures the `msoutlook-mcp` task is running, and starts ours. Safe to repeat. |
+| `uninstall` | Stops and removes our logon task and installed copy; leaves `msoutlook-mcp` installed. `--purge` also deletes the local key, config and state. |
+| `upgrade` | Updates torbit-bridge to the latest release (`--check` only looks; `--version X` picks one). Never upgrades `msoutlook-mcp`. |
 | `revoke` | Revokes the device in Orbit, then deletes the local key, config and state. |
 | `status` | Device, key, last run, counts, logon task state, version. |
 | `run` | Delivers mail in the foreground. The logon task runs this for you. |
@@ -111,10 +147,16 @@ reason stay skipped.
 Run it first when something is wrong. It checks: the bridge folder, enrollment,
 that the signing key exists and produces a signature that verifies, that Orbit
 answers (through your proxy settings) and that the PC clock is within the 5
-minutes Orbit allows, items waiting or skipped, the last run, that classic
-Outlook answers, and the logon task (registered, enabled, installed copy runs and
-has this version, worker running; also a leftover service from the Go version).
+minutes Orbit allows, items waiting or skipped, the last run, `msoutlook-mcp`
+(installed, token readable, daemon answering `/health`, state `connected`,
+version at least 0.2.0, its logon task registered), that classic Outlook answers
+through it, and our logon task (registered, enabled, installed copy runs and has
+this version, worker running; also a leftover service from the Go version).
 Each warning or failure has a hint.
+
+If `msoutlook-mcp` is absent, stopped or too old, `doctor` fails with the exact
+command to fix it. Version 0.1.x has no transport-header or attachment-byte
+tools, so the bridge cannot work with it.
 
 ### run
 
@@ -122,22 +164,31 @@ Each warning or failure has a hint.
 torbit-bridge run [--interval 60] [--background]
 ```
 
-Stays running. It sweeps the Outlook inbox (the Inbox folder only, not
-subfolders, Sent or Junk) by received time every `--interval` seconds (default
-60). The first sweep starts at the enrollment time. Each item is delivered once:
-the entry ids are kept in `state.json` next to `config.json`, so restarts and
-overlapping sweeps do not repeat mail. Deleting or moving a mail in Outlook is
-not sent to Orbit.
+Stays running. It sweeps the Inbox (the Inbox folder only, not subfolders, Sent
+or Junk) by received time every `--interval` seconds (default 60). The first
+sweep starts at the enrollment time. Each item is delivered once: the entry ids
+are kept in `state.json` next to `config.json`, so restarts and overlapping
+sweeps do not repeat mail. Deleting or moving a mail in Outlook is not sent to
+Orbit.
+
+Each item is read with one `read_mail` call that returns the body, the raw
+transport headers (so `Message-ID`, `From`, `References` and `In-Reply-To`
+survive) and attachment bytes. The bridge caps the whole item at 2 MiB, the same
+limit Orbit enforces. If `msoutlook-mcp` reports any attachment as skipped
+(`too_large`, `total_cap` or `unavailable`), the whole item is recorded as
+skipped with 413 rather than delivering a partial message.
 
 When Orbit or the network is not reachable (HTTP 503 and similar), the bridge
 retries with a growing wait, then tries again at the next sweep. If Orbit
 answers 401 or 413 (or another 4xx), the item is recorded as skipped and not
-sent again. Attachments are read from Outlook one item at a time, only when the
-item is sent; an item that Outlook reports as larger than 2 MiB is skipped
-(413, too large) without reading its attachments. Only one `run` can be active
-per Windows session, so a manual `run` next to the logon task stops with "already
-running" (stop the task's worker first with `torbit-bridge stop`). The log is `bridge.log` in `%LOCALAPPDATA%\Torbit\Bridge`; it has
-events and ids only, never message text.
+sent again. If `msoutlook-mcp` is stopped or Outlook is closed, reading an item
+is retried; when attempts run out the rest of the sweep waits for the next one.
+A daemon that is running but in its `error` state, or that rejects the token
+(HTTP 401), fails the whole sweep with a hint and marks nothing skipped, so mail
+is not lost silently. Only one `run` can be active per Windows session, so a
+manual `run` next to the logon task stops with "already running" (stop the
+task's worker first with `torbit-bridge stop`). The log is `bridge.log` in
+`%LOCALAPPDATA%\Torbit\Bridge`; it has events and ids only, never message text.
 
 ### backfill
 
@@ -175,6 +226,10 @@ expected version, and only then stops the worker, swaps the installed copy (and
 the copy you ran), and starts the task again. Enrollment, key and state are
 untouched. If anything fails before the swap, nothing changes. It
 downloads through your proxy settings. To go back, `upgrade --version <older>`.
+It checks the installed `msoutlook-mcp` version and warns when the daemon is
+missing, older than 0.2.0 or running a different build from its installed exe,
+but it never downloads or upgrades `msoutlook-mcp` (that daemon also serves
+agent clients). Update it separately with its own release.
 
 ### uninstall
 
@@ -182,11 +237,19 @@ downloads through your proxy settings. To go back, `upgrade --version <older>`.
 torbit-bridge uninstall [--purge]
 ```
 
-Removes the logon task and the installed copy. The device stays enrolled unless you pass `--purge` (local
-data only; it does not tell Orbit, so use `revoke` first to also remove the
-device in Orbit).
+Removes our logon task and the installed copy. It leaves `msoutlook-mcp`
+installed, configured and running; remove that separately with
+`msoutlook-mcp uninstall` if you no longer need it. The device stays enrolled
+unless you pass `--purge` (local data only; it does not tell Orbit, so use
+`revoke` first to also remove the device in Orbit).
 
 ## Moving from an earlier bridge
+
+**`torbit-bridge upgrade` alone is not enough.** This bridge reads Outlook
+through `msoutlook-mcp`, so install and verify the dependency first (see
+[Install the dependency first](#install-the-dependency-first)): 0.2.0 or later,
+`setup` done, daemon running, `/health` reporting `connected`. Then update the
+bridge as before.
 
 The PowerShell bridge (`bridge.ps1`) and the short-lived Go bridge used the same
 `config.json`, `state.json` and key store entry, so an enrolled PC needs no
@@ -208,38 +271,53 @@ new-mail event, it sweeps every 60 seconds instead (set `--interval` to change
 that); and it follows the proxy configured in Windows settings or `HTTPS_PROXY`,
 not a PAC script or sign-in with the Windows account (see [Proxy](#proxy)).
 
-## Manual COM verification checklist
+## Manual verification checklist
 
-Automated tests use a fake Outlook. Check the real thing once on each PC
+Automated tests use a fake MCP endpoint. Check the real thing once on each PC
 configuration before you roll out:
 
-1. Classic Outlook is installed, open and signed in.
-2. `setup` finishes and `status` shows the device and key location.
-3. Send yourself a plain text mail and a mail with an attachment. Run `torbit-bridge run` (or wait a minute with the logon task running).
-   Both appear in the Orbit mailbox, with the attachment intact.
-4. Run `torbit-bridge run` again. No duplicates appear.
-5. Run `backfill` with a date a few days back. Older mail appears once.
-6. Stop the Orbit service, run `run`, start the Orbit service, run `run`. The mail
-   arrives once after Orbit is back.
-7. Run `install`, sign out and in again (or `torbit-bridge start`). `doctor` shows the
-   logon task and a running worker, and a new mail arrives without a console window.
-8. Close Outlook and run `run`. The error text says what to do.
-9. `revoke`. A later `run` fails with a message to enroll again.
+1. `msoutlook-mcp` 0.2.0+ is installed and its logon task enabled; its
+   `/health` says `connected`; classic Outlook is open, signed in and minimized.
+2. `torbit-bridge setup` finishes and `status` shows the device and key location.
+3. Send yourself a plain text mail, a mail with a normal attachment, and an HTML
+   mail with an inline `cid:` image. Run `torbit-bridge run` (or wait a minute
+   with the logon task running). All arrive in the Orbit mailbox: body intact,
+   inline image shown inline, attachment bytes identical.
+4. Reply to one of those mails from another account. In Orbit, the reply keeps
+   its `References` and `In-Reply-To` headers and threads with the original.
+5. Run `torbit-bridge run` again. No duplicates appear.
+6. Run `backfill` with a date a few days back. Older mail appears once.
+7. Move more than 1000 inbox mails into a test window (or use a mailbox that
+   already has them) and let a sweep drain it. Every item is delivered exactly
+   once, including a block that shares one `ReceivedTime`.
+8. Close Outlook, run `run` (or wait for a sweep). The item stays pending and
+   is delivered after Outlook is opened and minimized again.
+9. Stop `msoutlook-mcp` (stop its task or `msoutlook-mcp uninstall` is not
+   needed: end the task). `doctor` says it is not running and gives the start
+   command; a sweep waits rather than skipping mail.
+10. Run `install`, sign out and in again (or `torbit-bridge start`). `doctor` shows
+    both logon tasks and a running worker, and a new mail arrives without a
+    console window.
+11. `revoke`. A later `run` fails with a message to enroll again.
 
 ## When Outlook automation is blocked (for IT)
 
-If `run` or `backfill` prints that Windows or your administrator blocked the
-bridge from using Outlook, the COM call was refused. Common causes: a policy
-that blocks programmatic access, a security product that blocks scripts from
-automating Outlook, or Outlook running at a different privilege level than the
-program (one elevated, one not). Run both as the same normal user. Allow
-`torbit-bridge.exe` and Windows PowerShell (which the bridge starts to reach
-Outlook) to use Outlook automation for the users who need the bridge. The helper
-needs PowerShell's FullLanguage mode: with AppLocker or WDAC in "constrained
-language" mode, Outlook's COM object cannot be created and `doctor` reports that
-Outlook is blocked. The
-error `Outlook (classic desktop version) is not installed` means new Outlook or
-no Outlook; the bridge does not support those.
+COM-level failures are now surfaced by **`msoutlook-mcp doctor`**; run that
+first. It reports the HRESULT and the fix, and its `Outlook Classic` check plus
+PowerShell language-mode check distinguish a policy block from Outlook being
+closed or not installed. Common causes: a policy that blocks programmatic
+access, a security product that blocks automation, or Outlook running at a
+different privilege level than the daemon (one elevated, one not). Run Outlook
+and the daemon as the same normal user. Allow `msoutlook-mcp.exe` and the
+PowerShell it starts to use Outlook automation for the users who need the
+bridge. With AppLocker or WDAC in "constrained language" mode, Outlook's COM
+object cannot be created and its doctor reports that Outlook is blocked.
+
+`torbit-bridge doctor` keeps a short summary line: `mcp Outlook` says
+`waiting_for_outlook` when Outlook is closed (open it and minimize it), and
+`error` with the daemon's message when COM is blocked. The bridge's own error
+text still says classic Outlook (desktop) is required and that "new Outlook" is
+not supported.
 
 ## Proxy
 

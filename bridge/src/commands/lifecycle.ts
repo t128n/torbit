@@ -8,6 +8,13 @@ import { compareVersions, assetName, latestRelease, releaseAsset, releaseVersion
 import { errText } from "../core/util.ts";
 import { fail, type FlagValues, intervalFlag, out, parseFlags } from "../cli.ts";
 import { isCompiled, isWindows } from "../platform/index.ts";
+import {
+  describeDependency,
+  ensureDependencyDaemon,
+  ensureDependencyTask,
+  readHealth,
+  readMcpSettings,
+} from "../platform/mcp/dependency.ts";
 import { removeFile, replaceFile } from "../platform/files.ts";
 import { createTask, currentUser, deleteTask, legacyServiceInstalled, queryTask, run, startTask, stopTask, TASK_NAME } from "../platform/windows/scheduler.ts";
 import { version } from "../version.ts";
@@ -36,7 +43,7 @@ function legacyNote(): void {
 }
 
 /** Copies this exe to the per-user folder and registers the logon task. No administrator rights are needed. */
-function installTask(v: FlagValues): number {
+async function installTask(v: FlagValues): Promise<number> {
   if (!isWindows) return fail(WINDOWS_ONLY);
   if (!isCompiled()) return fail("install copies torbit-bridge.exe; run it from the built executable, not from bun");
   let intervalMs: number;
@@ -45,6 +52,16 @@ function installTask(v: FlagValues): number {
   } catch (e) {
     return fail(errText(e));
   }
+
+  // The bridge cannot reach Outlook without its daemon. Start (or register) the dependency's own
+  // logon task first; it runs in the same interactive session and shares the Outlook connection.
+  const dep = await ensureDependencyDaemon();
+  if (!dep.ok) return fail(dep.message);
+  out(dep.message);
+  const depTask = ensureDependencyTask();
+  if (!depTask.ok) return fail(depTask.message);
+  out(depTask.message);
+
   const dest = installedExe();
   try {
     mkdirSync(installDir(), { recursive: true });
@@ -74,7 +91,7 @@ function installTask(v: FlagValues): number {
 
 export const cmdInstall: Command = async (args) => {
   const v = parseFlags("install", { ...INTERVAL_FLAG, "no-start": { type: "boolean", description: "register the task but do not start it now" } }, args);
-  return typeof v === "number" ? v : installTask(v);
+  return typeof v === "number" ? v : await installTask(v);
 };
 
 export const cmdUninstall: Command = async (args, { http, platform }) => {
@@ -96,6 +113,7 @@ export const cmdUninstall: Command = async (args, { http, platform }) => {
     } catch {
       /* not empty yet: the deferred delete is still pending */
     }
+    out("msoutlook-mcp is still installed and running; torbit-bridge does not remove it. To remove it too: msoutlook-mcp uninstall");
   } catch (e) {
     return fail(errText(e));
   }
@@ -156,6 +174,12 @@ export const cmdUpgrade: Command = async (args, { http, platform }) => {
   }
   const latest = releaseVersion(rel);
   out(`Installed: ${version}   Release: ${latest}`);
+  try {
+    const settings = readMcpSettings();
+    out(describeDependency(settings, await readHealth(settings, { timeoutMs: 4_000 })));
+  } catch (e) {
+    out(`msoutlook-mcp: ${errText(e)}`);
+  }
   if (!want && compareVersions(version, latest) >= 0) {
     out("Already up to date.");
     return 0;
@@ -247,7 +271,12 @@ export const cmdSetup: Command = async (args, ctx) => {
   }
   out("torbit-bridge setup");
 
-  out("\n[1/3] Enroll this PC");
+  out("\n[1/4] Check msoutlook-mcp");
+  const dep = await ensureDependencyDaemon();
+  if (!dep.ok) return fail(dep.message);
+  out(dep.message);
+
+  out("\n[2/4] Enroll this PC");
   try {
     const existing = readConfig();
     if (existing && !v.force) {
@@ -260,17 +289,17 @@ export const cmdSetup: Command = async (args, ctx) => {
     return fail(errText(e));
   }
 
-  out("\n[2/3] Check Outlook");
+  out("\n[3/4] Check Outlook");
   const oc = await checkOutlook(ctx);
   out(`${oc.level}: ${oc.detail}`);
   if (oc.hint) out("  -> " + oc.hint);
 
-  out("\n[3/3] Logon task");
+  out("\n[4/4] Logon task");
   if (v["no-task"]) {
     out("Skipped (--no-task). Run in a terminal with: torbit-bridge run");
   } else if (!ctx.platform.supported) {
     out("Skipped: the logon task is only available on Windows.");
-  } else if (installTask(v) !== 0) {
+  } else if ((await installTask(v)) !== 0) {
     out("The task was not installed. Enrollment is kept; retry with: torbit-bridge install");
     return 1;
   }

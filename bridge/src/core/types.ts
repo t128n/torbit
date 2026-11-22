@@ -31,6 +31,25 @@ export interface ItemRef {
   size: number;
 }
 
+/**
+ * The item cannot be delivered as it is (for example an attachment the daemon refused to return).
+ * It is recorded as skipped with this status; it is never retried and never sent partially.
+ */
+export class ItemUnusableError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ItemUnusableError";
+  }
+}
+
+/** The adapter could not read an item for a global reason (daemon error, token mismatch): the sweep stops. */
+export class FatalReadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FatalReadError";
+  }
+}
+
 /** A full inbox mail, read only when it is about to be sent. */
 export interface Item extends ItemRef {
   subject: string;

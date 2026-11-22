@@ -3,7 +3,7 @@ import { logf } from "./home.ts";
 import { MAX_BODY_BYTES, requestHeaders } from "./sign.ts";
 import type { Config } from "./state.ts";
 import { toMIME } from "./mime.ts";
-import type { Item, ItemRef, Platform, Signer } from "./types.ts";
+import { FatalReadError, ItemUnusableError, type Item, type ItemRef, type Platform, type Signer } from "./types.ts";
 import { errText } from "./util.ts";
 
 export type FetchFn = (url: string, init: RequestInit & { proxy?: string }) => Promise<Response>;
@@ -129,6 +129,16 @@ export async function sendItem(
   try {
     mime = toMIME(await read(ref.entryId));
   } catch (e) {
+    if (e instanceof ItemUnusableError) {
+      // The daemon refused to return all parts: deliver nothing rather than an incomplete mail.
+      logf(`item ${ref.entryId} -> Permanent (${e.status}, ${e.message})`);
+      return r("Permanent", e.status, e.message);
+    }
+    if (e instanceof FatalReadError) {
+      // The daemon (not this item) is in a bad state: fail the sweep so nothing is marked skipped.
+      logf(`item ${ref.entryId} -> sweep failed (${e.message})`);
+      throw e;
+    }
     logf(`item ${ref.entryId} -> Retry (could not read the item: ${errText(e)})`);
     return r("Retry", 0, "Could not read the item from Outlook: " + errText(e));
   }

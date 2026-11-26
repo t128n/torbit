@@ -1,6 +1,6 @@
 # Patch inventory
 
-Base: **Orbit v0.3.0**, commit `a7402204c7cadcac4747cbf47a60685a20f59498`.
+Base: **Orbit v0.4.1**, commit `17ed06ae5dcba8056c6fcec1ce4a40b1c978bed3`.
 
 | Patch | Upstream | Contents |
 |---|---|---|
@@ -11,6 +11,7 @@ Base: **Orbit v0.3.0**, commit `a7402204c7cadcac4747cbf47a60685a20f59498`.
 | `0005-feat-bridge-device-enrollment.patch` | local | Torbit bridge device registry, enrollment API and `.invalid` mailbox |
 | `0006-feat-bridge-signed-delivery.patch` | local | Signed bridge delivery endpoint |
 | `0007-feat-web-fork-notice.patch` | local | Dismissible "unofficial fork of Orbit" toast shown when the web app opens |
+| `0009-chore-web-pele-diagrams.patch` | local | Mermaid diagrams drawn by Pele (pele.run) instead of Mermaid.js |
 
 Polling is not included.
 
@@ -166,3 +167,25 @@ close or swipe) stores `torbit:fork-notice-dismissed:v1` in `localStorage`; with
 blocked storage it shows every time. The logic is in `forkNoticeState.ts`, with
 unit tests. Orbit has no About or version page, so there is nothing else to
 change. The mobile app is not built by this repository, so it is not ported.
+
+## 0009 details
+
+Mermaid diagrams (code blocks in tasks, comments, chat and docs) are drawn by
+[Pele](https://pele.run) instead of Mermaid.js: same Mermaid syntax, a tenth of
+the bundle (230 kB against 1.6 MB gzip), no dependencies. Code:
+
+- `apps/web/src/components/common/MermaidDiagram.tsx` — `render()` draws the
+  SVG synchronously. Mermaid's `<style>` in the SVG lost to the production CSP
+  (`style-src 'self'`), which took a copy of the rules into a constructed style
+  sheet and a second drawing; Pele references `--pele-*` variables instead and
+  writes no `<style>`, so all of that is gone. Its style attributes are allowed
+  (`style-src-attr 'unsafe-inline'`).
+- `apps/web/src/index.css` — the `--pele-*` variables mapped to the app colours
+  on the root of every picture (class `pele`). The theme switches live, without
+  the second render per theme Mermaid needed; the series colours (pie slices,
+  git branches) keep Pele's defaults.
+- `apps/web/package.json`, `bun.lock` — `pele ^1.13.0` for `mermaid ^12.2.0`.
+
+The `mermaid` code fence, the language detection (`packages/editor`) and the
+diagram types are unchanged; the drawing cache keeps a chat message that scrolls
+back into view at once.

@@ -6,4 +6,5 @@
 0005-feat-bridge-device-enrollment.patch
 0006-feat-bridge-signed-delivery.patch
 0007-feat-web-fork-notice.patch
+0008-fix-mail-html-frame-coop.patch
 0009-chore-web-pele-diagrams.patch

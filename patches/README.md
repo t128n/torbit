@@ -11,6 +11,7 @@ Base: **Orbit v0.4.1**, commit `17ed06ae5dcba8056c6fcec1ce4a40b1c978bed3`.
 | `0005-feat-bridge-device-enrollment.patch` | local | Torbit bridge device registry, enrollment API and `.invalid` mailbox |
 | `0006-feat-bridge-signed-delivery.patch` | local | Signed bridge delivery endpoint |
 | `0007-feat-web-fork-notice.patch` | local | Dismissible "unofficial fork of Orbit" toast shown when the web app opens |
+| `0008-fix-mail-html-frame-coop.patch` | local | Sandboxed mail view document gets `COOP: unsafe-none` so the reading pane iframe renders |
 | `0009-chore-web-pele-diagrams.patch` | local | Mermaid diagrams drawn by Pele (pele.run) instead of Mermaid.js |
 
 Polling is not included.
@@ -167,6 +168,24 @@ close or swipe) stores `torbit:fork-notice-dismissed:v1` in `localStorage`; with
 blocked storage it shows every time. The logic is in `forkNoticeState.ts`, with
 unit tests. Orbit has no About or version page, so there is nothing else to
 change. The mobile app is not built by this repository, so it is not ported.
+
+## 0008 details
+
+`add_security_headers` set `Cross-Origin-Opener-Policy: same-origin` on every
+response. Per the HTML Living Standard, a nested browsing context (an iframe)
+must not load a `same-origin` response, so browsers aborted the navigation of
+`/api/v1/mail/content/{token}` and the web reading pane showed a broken
+document instead of the message body (torbit issue #23).
+
+A handler that sets its own CSP (the sandboxed mail view document, the only
+one) now gets `Cross-Origin-Opener-Policy: unsafe-none` instead, like its
+framing rules; its sandbox CSP keeps the frame from reaching the app. Every
+other response still isolates its opener. Tests:
+`crates/platform/src/http/security.rs`,
+`crates/platform/tests/http_security.rs` and the real document in
+`apps/server/tests/mail_content.rs`. The fix is generic and belongs upstream;
+the authoring branch is `fix/mail-html-frame-coop` on
+[`t128n/orbit`](https://github.com/t128n/orbit).
 
 ## 0009 details
 

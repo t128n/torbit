@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1+9
+
+- Fix the HTML message body in the web reading pane: the sandboxed iframe
+  showed a broken document because the server sent
+  `Cross-Origin-Opener-Policy: same-origin` on the view document, which
+  forbids a nested browsing context from loading a response (patch 0008).
+  The framed document now gets `unsafe-none`; every other response still
+  isolates its opener.
+
 ## 0.4.1+8
 
 - Draw the Mermaid diagrams of the web app (code blocks in tasks, comments,

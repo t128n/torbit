@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1+8
+
+- Draw the Mermaid diagrams of the web app (code blocks in tasks, comments,
+  chat and the docs pages) with [Pele](https://pele.run) instead of
+  Mermaid.js: the same Mermaid syntax at about a tenth of the bundle
+  (230 kB against 1.6 MB gzip) and no dependencies (patch 0009). Diagram
+  colours now follow the app theme through CSS variables, so light and dark
+  need no separate render, and a failed drawing names the problem instead of
+  Mermaid's "Expecting" lists. The `mermaid` code fence and the diagram
+  types are unchanged.
+
 ## 0.4.1+6
 
 - Replace the bridge's own PowerShell/COM Outlook helper with a client for the

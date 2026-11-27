@@ -23,7 +23,7 @@ const proc = Bun.spawn(
     `--define`, `BUILD_VERSION=${JSON.stringify(version)}`,
     // File properties can only be written when building on Windows (CI does).
     ...(process.platform === "win32"
-      ? ["--windows-title", "torbit-bridge", "--windows-description", "Outlook to Torbit/Orbit mail bridge", "--windows-version", fileVersion]
+      ? ["--windows-hide-console", "--windows-title", "torbit-bridge", "--windows-description", "Outlook to Torbit/Orbit mail bridge", "--windows-version", fileVersion]
       : []),
     join(root, "src", "main.ts"), "--outfile", outfile,
   ],

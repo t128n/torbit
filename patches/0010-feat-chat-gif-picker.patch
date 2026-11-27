@@ -1,12 +1,15 @@
-From 07c7f071644a2c5a73ae45ffd8b6a74a698a809f Mon Sep 17 00:00:00 2001
+From 5b98aae1d8a60727f397958db47e0a7b6fe750e5 Mon Sep 17 00:00:00 2001
 From: Torben Haack <t128n@ipv4.8shield.net>
-Date: Fri, 27 Nov 2026 11:23:43 +0100
+Date: Fri, 27 Nov 2026 13:41:16 +0100
 Subject: [PATCH] feat(chat): add GIF search and picker to chat composer
 
 Add GIF search and a picker popover to the chat composer toolbar,
 allowing users to search, preview, and send animated GIFs directly
 in chat channels and direct messages via Tenor, Giphy, or custom
 providers.
+
+Allow client-side search to connect to https providers under Content
+Security Policy (connect-src 'self' https:).
 
 Closes t128n/torbit#30
 ---
@@ -15,7 +18,9 @@ Closes t128n/torbit#30
  .../chat/components/composer/GifPicker.tsx    | 163 ++++++++++++++
  .../src/features/chat/lib/gifClient.test.ts   | 190 ++++++++++++++++
  apps/web/src/features/chat/lib/gifClient.ts   | 211 ++++++++++++++++++
- 5 files changed, 730 insertions(+)
+ crates/platform/src/http/security.rs          |   9 +-
+ crates/platform/tests/http_security.rs        |   4 +-
+ 7 files changed, 739 insertions(+), 4 deletions(-)
  create mode 100644 apps/web/src/features/chat/components/composer/GifPicker.test.tsx
  create mode 100644 apps/web/src/features/chat/components/composer/GifPicker.tsx
  create mode 100644 apps/web/src/features/chat/lib/gifClient.test.ts
@@ -808,6 +813,49 @@ index 00000000..4f6cd004
 +    return { gifs: [] }
 +  }
 +}
+diff --git a/crates/platform/src/http/security.rs b/crates/platform/src/http/security.rs
+index a1c36926..b02c118a 100644
+--- a/crates/platform/src/http/security.rs
++++ b/crates/platform/src/http/security.rs
+@@ -296,7 +296,7 @@ pub(crate) fn add_security_headers(
+     // `media-src` `https:` lets a document play an audio or video file the page links to.
+     let github_origin = github_host.web_origin();
+     let policy = format!(
+-        "default-src 'self'; {script_source}style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; frame-src 'self' blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' {github_origin}"
++        "default-src 'self'; {script_source}style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' https:; frame-src 'self' blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' {github_origin}"
+     );
+     // A handler that sets its own policy keeps it (the sandboxed mail view document).
+     let handler_policy = headers.contains_key(CONTENT_SECURITY_POLICY);
+@@ -374,6 +374,8 @@ mod tests {
+         add_security_headers(&mut headers, true, None, &crate::GitHubHost::default());
+         assert_eq!(headers["x-frame-options"], "DENY");
+         assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
++        let csp = headers["content-security-policy"].to_str().unwrap();
++        assert!(csp.contains("connect-src 'self' https:;"));
+         let csp = headers["content-security-policy"].to_str().unwrap();
+         assert!(csp.contains("frame-src 'self' blob:"));
+     }
+diff --git a/crates/platform/tests/http_security.rs b/crates/platform/tests/http_security.rs
+index 03c8a948..0093ecb2 100644
+--- a/crates/platform/tests/http_security.rs
++++ b/crates/platform/tests/http_security.rs
+@@ -530,6 +530,7 @@ async fn security_headers_are_added_to_every_response() {
+         .to_str()
+         .unwrap();
+     assert!(csp.contains("default-src 'self'"));
++    assert!(csp.contains("connect-src 'self' https:;"));
+     assert!(csp.contains("frame-src 'self' blob:"));
+     assert!(csp.contains("frame-ancestors 'none'"));
+     assert!(csp.contains("form-action 'self' https://github.com"));
+@@ -881,7 +882,7 @@ async fn csp_allows_only_the_verified_bootstrap_hash_and_local_image_variants()
+     assert!(!csp.contains("http:"));
+     assert_eq!(
+         csp,
+-        "default-src 'self'; script-src 'self' 'sha256-YWJj'; style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; frame-src 'self' blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' https://github.com"
++        "default-src 'self'; script-src 'self' 'sha256-YWJj'; style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' https:; frame-src 'self' blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' https://github.com"
+     );
+ }
+ 
 -- 
 2.56.1.windows.1
 

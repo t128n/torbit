@@ -304,6 +304,9 @@ test("health and the daemon settings are read from the daemon's own files", asyn
 });
 
 test("doctor fails clearly when msoutlook-mcp is absent, stopped or too old", async () => {
+  const empty = mkdtempSync(join(tmpdir(), "torbit-mcp-empty-"));
+  homes.push(empty);
+  process.env.MSOUTLOOK_MCP_HOME = empty;
   const absent = await checkMsoutlookMcp();
   expect(absent[0]).toMatchObject({ name: "msoutlook-mcp", level: "fail" });
   expect(absent[0]!.hint).toContain("msoutlook-mcp setup");

@@ -11,6 +11,7 @@ test("task XML runs at logon for one user, unelevated, without a time limit", ()
   expect(xml).toContain("<LogonType>InteractiveToken</LogonType>");
   expect(xml).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
   expect(xml).toContain("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");
+  expect(xml).toContain("<Hidden>true</Hidden>");
   expect(xml).toContain("Zoë &amp; Co");
   expect(xml).toContain("<Arguments>run --background --interval 60</Arguments>");
 });

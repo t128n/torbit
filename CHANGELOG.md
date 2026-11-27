@@ -1,11 +1,18 @@
 # Changelog
 
+## 0.4.1+12
+
+- Switch Tenor GIF search in the chat composer to the official client browser
+  key, send GIFs as interactive Tenor embeds in chat messages, isolate the
+  pinned category header to eliminate pill overlap, and render GIFs in an
+  uncropped 2-column masonry layout preserving natural aspect ratios (PR #33).
+
 ## 0.4.1+11
 
 - Add GIF search and a picker popover to the chat composer toolbar (patch 0010,
-  ticket #30). Users can search, preview, and send animated GIFs directly in chat
-  channels and direct messages, powered by configurable GIF providers (Tenor,
-  Giphy, or custom/self-hosted endpoints).
+  ticket #30, PR #32). Users can search, preview, and send animated GIFs
+  directly in chat channels and direct messages, powered by configurable GIF
+  providers (Tenor, Giphy, or custom/self-hosted endpoints).
 
 ## 0.4.1+10
 

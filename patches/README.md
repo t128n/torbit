@@ -13,6 +13,7 @@ Base: **Orbit v0.4.1**, commit `17ed06ae5dcba8056c6fcec1ce4a40b1c978bed3`.
 | `0007-feat-web-fork-notice.patch` | local | Dismissible "unofficial fork of Orbit" toast shown when the web app opens |
 | `0008-fix-mail-html-frame-coop.patch` | local | Sandboxed mail view document gets `COOP: unsafe-none` and base CSP allows `frame-src 'self'` so the reading pane iframe renders |
 | `0009-chore-web-pele-diagrams.patch` | local | Mermaid diagrams drawn by Pele (pele.run) instead of Mermaid.js |
+| `0010-feat-chat-gif-picker.patch` | local | GIF search and picker in the chat composer |
 
 Polling is not included.
 
@@ -214,3 +215,21 @@ the bundle (230 kB against 1.6 MB gzip), no dependencies. Code:
 The `mermaid` code fence, the language detection (`packages/editor`) and the
 diagram types are unchanged; the drawing cache keeps a chat message that scrolls
 back into view at once.
+
+## 0010 details
+
+GIF search and picker popover for the chat composer (ticket #30):
+
+- `apps/web/src/features/chat/components/composer/Composer.tsx` — adds a `GIF`
+  toolbar button alongside the emoji and sticker buttons; selecting a GIF sends
+  it immediately when the composer is empty, or inserts `![title](url)` into the
+  draft at the cursor.
+- `apps/web/src/features/chat/components/composer/GifPicker.tsx` — search input
+  with debounce, scrollable responsive grid of animated GIF previews, empty state,
+  loading spinner, and custom `GifIcon`.
+- `apps/web/src/features/chat/lib/gifClient.ts` — provider adapter supporting
+  Tenor (default, using Google Tenor v2/v1), Giphy, and custom/self-hosted
+  endpoints (such as Kliph) via environment variables (`VITE_ORBIT_GIF_PROVIDER`,
+  `VITE_ORBIT_GIF_API_KEY`, `VITE_ORBIT_GIF_ENDPOINT`).
+- Unit and integration tests in `gifClient.test.ts` and `GifPicker.test.tsx`.
+

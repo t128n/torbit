@@ -1,0 +1,772 @@
+From 0808a369800ce6065ea38317de7c9e6984598a87 Mon Sep 17 00:00:00 2001
+From: Torben Haack <t128n@ipv4.8shield.net>
+Date: Fri, 27 Nov 2026 09:23:29 +0100
+Subject: [PATCH] feat(chat): add GIF search and picker to chat composer
+
+Add GIF search and a picker popover to the chat composer toolbar,
+allowing users to search, preview, and send animated GIFs directly
+in chat channels and direct messages via Tenor, Giphy, or custom
+providers.
+
+Closes t128n/torbit#30
+---
+ .../chat/components/composer/Composer.tsx     |  27 +++
+ .../components/composer/GifPicker.test.tsx    | 139 ++++++++++++
+ .../chat/components/composer/GifPicker.tsx    | 156 +++++++++++++
+ .../src/features/chat/lib/gifClient.test.ts   | 161 ++++++++++++++
+ apps/web/src/features/chat/lib/gifClient.ts   | 206 ++++++++++++++++++
+ 5 files changed, 689 insertions(+)
+ create mode 100644 apps/web/src/features/chat/components/composer/GifPicker.test.tsx
+ create mode 100644 apps/web/src/features/chat/components/composer/GifPicker.tsx
+ create mode 100644 apps/web/src/features/chat/lib/gifClient.test.ts
+ create mode 100644 apps/web/src/features/chat/lib/gifClient.ts
+
+diff --git a/apps/web/src/features/chat/components/composer/Composer.tsx b/apps/web/src/features/chat/components/composer/Composer.tsx
+index 972e82c6..0f1805fd 100644
+--- a/apps/web/src/features/chat/components/composer/Composer.tsx
++++ b/apps/web/src/features/chat/components/composer/Composer.tsx
+@@ -36,7 +36,9 @@ import { ComposerReferencePreview } from './ComposerReferencePreview'
+ import { completeCodeFence, inOpenCodeBlock } from './composerSegments'
+ import { ComposerUploads } from './ComposerUploads'
+ import { EmojiSuggestions } from './EmojiSuggestions'
++import { GifIcon, GifPicker } from './GifPicker'
+ import { StickerPicker } from './StickerPicker'
++import type { GifItem } from '../../lib/gifClient'
+ import { useAutosize } from './useAutosize'
+ import { useEmojiAutocomplete } from './useEmojiAutocomplete'
+ import { useUploads } from './useUploads'
+@@ -90,6 +92,7 @@ export function Composer({ ref, conversation, threadRootId = null, replyTo = nul
+   const [text, setTextState] = useState(() => getDraft(workspaceId, conversationId, threadRootId))
+   const [alsoInChannel, setAlsoInChannel] = useState(false)
+   const [emojiOpen, setEmojiOpen] = useState(false)
++  const [gifOpen, setGifOpen] = useState(false)
+   const [stickerOpen, setStickerOpen] = useState(false)
+   const stickers = useCustomStickers(workspaceId).data ?? []
+   const input = useRef<HTMLTextAreaElement>(null)
+@@ -172,6 +175,18 @@ export function Composer({ ref, conversation, threadRootId = null, replyTo = nul
+     onSent?.()
+   }
+ 
++  function onPickGif(gif: GifItem) {
++    setGifOpen(false)
++    const markdown = `![${gif.title || 'GIF'}](${gif.url})`
++    if (text.trim() === '' && uploads.length === 0) {
++      send({ conversationId, threadRootId, replyTo: replyTo && quoteOf(replyTo), body: markdown })
++      onClearReply?.()
++      onSent?.()
++    } else {
++      insertAtCursor(markdown)
++    }
++  }
++
+   function insertAtCursor(insertion: string) {
+     const element = input.current
+     const start = element?.selectionStart ?? text.length
+@@ -362,6 +377,18 @@ export function Composer({ ref, conversation, threadRootId = null, replyTo = nul
+                 />
+               </PopoverContent>
+             </Popover>
++            <Popover open={gifOpen} onOpenChange={setGifOpen} modal={false}>
++              <Tip label="Add GIF">
++                <PopoverTrigger render={<Button variant="ghost" size="icon" aria-label="Add GIF" />}>
++                  <GifIcon className="size-5" />
++                </PopoverTrigger>
++              </Tip>
++              {gifOpen ? (
++                <PopoverContent side="top" align="start" finalFocus={input} className="w-auto gap-0 p-0">
++                  <GifPicker onPick={onPickGif} />
++                </PopoverContent>
++              ) : null}
++            </Popover>
+             {stickers.length > 0 ? (
+               <Popover open={stickerOpen} onOpenChange={setStickerOpen} modal={false}>
+                 <Tip label="Send a sticker">
+diff --git a/apps/web/src/features/chat/components/composer/GifPicker.test.tsx b/apps/web/src/features/chat/components/composer/GifPicker.test.tsx
+new file mode 100644
+index 00000000..13c7418a
+--- /dev/null
++++ b/apps/web/src/features/chat/components/composer/GifPicker.test.tsx
+@@ -0,0 +1,139 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test'
++import { render, screen, waitFor } from '@testing-library/react'
++import userEvent from '@testing-library/user-event'
++import { GifPicker } from './GifPicker'
++import type { GifItem } from '../../lib/gifClient'
++
++const realFetch = globalThis.fetch
++
++const mockGifs: GifItem[] = [
++  {
++    id: 'gif-1',
++    title: 'Happy Cat',
++    url: 'https://media.test/cat.gif',
++    previewUrl: 'https://media.test/cat-preview.gif',
++    width: 200,
++    height: 200,
++  },
++  {
++    id: 'gif-2',
++    title: 'Dancing Dog',
++    url: 'https://media.test/dog.gif',
++    previewUrl: 'https://media.test/dog-preview.gif',
++    width: 200,
++    height: 200,
++  },
++]
++
++beforeEach(() => {
++  globalThis.fetch = (async (input: RequestInfo | URL) => {
++    const url = input.toString()
++    if (url.includes('search')) {
++      if (url.includes('q=empty')) {
++        return new Response(JSON.stringify({ results: [] }), {
++          status: 200,
++          headers: { 'Content-Type': 'application/json' },
++        })
++      }
++      return new Response(
++        JSON.stringify({
++          results: [
++            {
++              id: 'gif-search-1',
++              content_description: 'Searched Dancing Dog',
++              media_formats: {
++                gif: { url: 'https://media.test/search-dog.gif' },
++                tinygif: { url: 'https://media.test/search-dog-preview.gif' },
++              },
++            },
++          ],
++        }),
++        {
++          status: 200,
++          headers: { 'Content-Type': 'application/json' },
++        },
++      )
++    }
++
++    // Default trending
++    return new Response(
++      JSON.stringify({
++        results: [
++          {
++            id: mockGifs[0].id,
++            content_description: mockGifs[0].title,
++            media_formats: {
++              gif: { url: mockGifs[0].url },
++              tinygif: { url: mockGifs[0].previewUrl },
++            },
++          },
++          {
++            id: mockGifs[1].id,
++            content_description: mockGifs[1].title,
++            media_formats: {
++              gif: { url: mockGifs[1].url },
++              tinygif: { url: mockGifs[1].previewUrl },
++            },
++          },
++        ],
++      }),
++      {
++        status: 200,
++        headers: { 'Content-Type': 'application/json' },
++      },
++    )
++  }) as unknown as typeof fetch
++})
++
++afterEach(() => {
++  globalThis.fetch = realFetch
++})
++
++test('renders search input and initial trending gifs', async () => {
++  render(<GifPicker onPick={() => {}} />)
++
++  expect(screen.getByPlaceholderText('Search GIFs')).toBeDefined()
++
++  await waitFor(() => {
++    expect(screen.getByLabelText('Happy Cat')).toBeDefined()
++    expect(screen.getByLabelText('Dancing Dog')).toBeDefined()
++  })
++})
++
++test('selecting a gif calls onPick with the chosen gif item', async () => {
++  const picked: GifItem[] = []
++  render(<GifPicker onPick={(gif) => picked.push(gif)} />)
++
++  const catBtn = await screen.findByLabelText('Happy Cat')
++  await userEvent.click(catBtn)
++
++  expect(picked.length).toBe(1)
++  expect(picked[0].id).toBe('gif-1')
++  expect(picked[0].url).toBe('https://media.test/cat.gif')
++})
++
++test('searching updates the displayed gifs', async () => {
++  render(<GifPicker onPick={() => {}} />)
++
++  await screen.findByLabelText('Happy Cat')
++
++  const input = screen.getByPlaceholderText('Search GIFs')
++  await userEvent.type(input, 'dog')
++
++  await waitFor(() => {
++    expect(screen.getByLabelText('Searched Dancing Dog')).toBeDefined()
++  })
++})
++
++test('shows empty state when no results match query', async () => {
++  render(<GifPicker onPick={() => {}} />)
++
++  await screen.findByLabelText('Happy Cat')
++
++  const input = screen.getByPlaceholderText('Search GIFs')
++  await userEvent.type(input, 'empty')
++
++  await waitFor(() => {
++    expect(screen.getByText('No GIFs match')).toBeDefined()
++  })
++})
+diff --git a/apps/web/src/features/chat/components/composer/GifPicker.tsx b/apps/web/src/features/chat/components/composer/GifPicker.tsx
+new file mode 100644
+index 00000000..5ece7d4c
+--- /dev/null
++++ b/apps/web/src/features/chat/components/composer/GifPicker.tsx
+@@ -0,0 +1,156 @@
++import { useEffect, useRef, useState } from 'react'
++import { Search4 } from 'reicon-react'
++import { Tip } from '@/components/common/Tip'
++import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group'
++import { Spinner } from '@/components/ui/spinner'
++import { searchGifs, trendingGifs, type GifItem } from '../../lib/gifClient'
++
++export interface GifPickerProps {
++  onPick: (gif: GifItem) => void
++}
++
++export function GifIcon(props: React.SVGProps<SVGSVGElement>) {
++  return (
++    <svg
++      viewBox="0 0 24 24"
++      fill="none"
++      stroke="currentColor"
++      strokeWidth="1.5"
++      strokeLinecap="round"
++      strokeLinejoin="round"
++      {...props}
++    >
++      <rect x="2.5" y="4.5" width="19" height="15" rx="3" />
++      <path d="M8.5 10H7C6.17 10 5.5 10.67 5.5 11.5V12.5C5.5 13.33 6.17 14 7 14H8.5V12H7" />
++      <path d="M12 10V14" />
++      <path d="M15.5 14V10H18.5" />
++      <path d="M15.5 12H17.5" />
++    </svg>
++  )
++}
++
++const POPULAR_CATEGORIES = [
++  'Trending',
++  'Yes',
++  'No',
++  'Dance',
++  'Celebrate',
++  'Applause',
++  'Laugh',
++  'Love',
++]
++
++/**
++ * The GIF picker panel of the composer: search input with category/trending previews
++ * and search results in a responsive scrollable grid.
++ */
++export function GifPicker({ onPick }: GifPickerProps) {
++  const [search, setSearch] = useState('')
++  const [gifs, setGifs] = useState<GifItem[]>([])
++  const [loading, setLoading] = useState(false)
++  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
++
++  useEffect(() => {
++    if (debounceTimer.current) {
++      clearTimeout(debounceTimer.current)
++    }
++
++    const query = search.trim()
++    debounceTimer.current = setTimeout(async () => {
++      setLoading(true)
++      try {
++        const result = query ? await searchGifs(query) : await trendingGifs()
++        setGifs(result.gifs)
++      } finally {
++        setLoading(false)
++      }
++    }, query ? 250 : 0)
++
++    return () => {
++      if (debounceTimer.current) {
++        clearTimeout(debounceTimer.current)
++      }
++    }
++  }, [search])
++
++  return (
++    <div
++      data-slot="gif-picker"
++      className="flex max-h-[380px] w-[344px] max-w-[calc(100vw-2rem)] flex-col"
++    >
++      <div className="p-2 pb-1.5">
++        <InputGroup className="border-0 bg-secondary/40 dark:bg-secondary/40">
++          <InputGroupAddon>
++            <Search4 />
++          </InputGroupAddon>
++          <InputGroupInput
++            autoFocus
++            type="search"
++            value={search}
++            placeholder="Search GIFs"
++            aria-label="Search GIFs"
++            autoComplete="off"
++            onChange={(event) => setSearch(event.target.value)}
++          />
++        </InputGroup>
++      </div>
++
++      <div
++        data-slot="gif-categories"
++        className="flex gap-1 overflow-x-auto px-2 pb-1.5 text-xs text-muted-foreground no-scrollbar"
++      >
++        {POPULAR_CATEGORIES.map((category) => {
++          const isSelected =
++            category === 'Trending' ? search === '' : search.toLowerCase() === category.toLowerCase()
++          return (
++            <button
++              key={category}
++              type="button"
++              className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
++                isSelected
++                  ? 'bg-primary text-primary-foreground'
++                  : 'bg-muted/60 hover:bg-muted text-foreground'
++              }`}
++              onClick={() => setSearch(category === 'Trending' ? '' : category)}
++            >
++              {category}
++            </button>
++          )
++        })}
++      </div>
++
++      {loading && gifs.length === 0 ? (
++        <div className="flex h-36 items-center justify-center p-4">
++          <Spinner className="size-6 text-muted-foreground" />
++        </div>
++      ) : gifs.length > 0 ? (
++        <div
++          data-slot="gif-grid"
++          className="grid min-h-0 grid-cols-2 gap-1.5 overflow-y-auto overscroll-contain px-2 pb-2"
++        >
++          {gifs.map((gif) => (
++            <Tip key={gif.id} label={gif.title}>
++              <button
++                type="button"
++                data-slot="gif-button"
++                aria-label={gif.title}
++                className="group relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-md bg-muted/40 outline-none hover:opacity-90 focus-visible:ring-3 focus-visible:ring-ring/50"
++                onClick={() => onPick(gif)}
++              >
++                <img
++                  src={gif.previewUrl || gif.url}
++                  alt={gif.title}
++                  draggable={false}
++                  loading="lazy"
++                  className="size-full object-cover transition-transform group-hover:scale-105"
++                />
++              </button>
++            </Tip>
++          ))}
++        </div>
++      ) : (
++        <p className="px-3 pb-3 text-sm text-muted-foreground">No GIFs match</p>
++      )}
++    </div>
++  )
++}
+diff --git a/apps/web/src/features/chat/lib/gifClient.test.ts b/apps/web/src/features/chat/lib/gifClient.test.ts
+new file mode 100644
+index 00000000..0df74ca5
+--- /dev/null
++++ b/apps/web/src/features/chat/lib/gifClient.test.ts
+@@ -0,0 +1,161 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test'
++import { searchGifs, trendingGifs, type GifConfig } from './gifClient'
++
++const realFetch = globalThis.fetch
++
++beforeEach(() => {
++  globalThis.fetch = realFetch
++})
++
++afterEach(() => {
++  globalThis.fetch = realFetch
++})
++
++test('searchGifs with Tenor (default) parses results correctly', async () => {
++  const tenorResponse = {
++    results: [
++      {
++        id: 'tenor-1',
++        content_description: 'Happy Dance Cat',
++        media_formats: {
++          gif: {
++            url: 'https://media.tenor.com/cat-dance.gif',
++            dims: [400, 300],
++          },
++          tinygif: {
++            url: 'https://media.tenor.com/cat-dance-preview.gif',
++            dims: [200, 150],
++          },
++        },
++      },
++    ],
++    next: 'pos-123',
++  }
++
++  let requestedUrl = ''
++  globalThis.fetch = (async (input: RequestInfo | URL) => {
++    requestedUrl = input.toString()
++    return new Response(JSON.stringify(tenorResponse), {
++      status: 200,
++      headers: { 'Content-Type': 'application/json' },
++    })
++  }) as unknown as typeof fetch
++
++  const result = await searchGifs('cat', { config: { provider: 'tenor', apiKey: 'test-key' } })
++
++  expect(requestedUrl).toContain('tenor.googleapis.com/v2/search')
++  expect(requestedUrl).toContain('q=cat')
++  expect(requestedUrl).toContain('key=test-key')
++  expect(result.next).toBe('pos-123')
++  expect(result.gifs).toEqual([
++    {
++      id: 'tenor-1',
++      title: 'Happy Dance Cat',
++      url: 'https://media.tenor.com/cat-dance.gif',
++      previewUrl: 'https://media.tenor.com/cat-dance-preview.gif',
++      width: 400,
++      height: 300,
++    },
++  ])
++})
++
++test('searchGifs with Giphy parses results correctly', async () => {
++  const giphyResponse = {
++    data: [
++      {
++        id: 'giphy-1',
++        title: 'Celebration GIF',
++        images: {
++          original: {
++            url: 'https://media.giphy.com/media/1/giphy.gif',
++            width: '480',
++            height: '270',
++          },
++          fixed_width_small: {
++            url: 'https://media.giphy.com/media/1/100w.gif',
++            width: '100',
++            height: '56',
++          },
++        },
++      },
++    ],
++    pagination: {
++      offset: 0,
++      count: 1,
++      total_count: 50,
++    },
++  }
++
++  let requestedUrl = ''
++  globalThis.fetch = (async (input: RequestInfo | URL) => {
++    requestedUrl = input.toString()
++    return new Response(JSON.stringify(giphyResponse), {
++      status: 200,
++      headers: { 'Content-Type': 'application/json' },
++    })
++  }) as unknown as typeof fetch
++
++  const config: GifConfig = { provider: 'giphy', apiKey: 'giphy-key-123' }
++  const result = await searchGifs('party', { config, limit: 10 })
++
++  expect(requestedUrl).toContain('api.giphy.com/v1/gifs/search')
++  expect(requestedUrl).toContain('q=party')
++  expect(requestedUrl).toContain('api_key=giphy-key-123')
++  expect(requestedUrl).toContain('limit=10')
++  expect(result.next).toBe('1') // next offset
++  expect(result.gifs).toEqual([
++    {
++      id: 'giphy-1',
++      title: 'Celebration GIF',
++      url: 'https://media.giphy.com/media/1/giphy.gif',
++      previewUrl: 'https://media.giphy.com/media/1/100w.gif',
++      width: 480,
++      height: 270,
++    },
++  ])
++})
++
++test('trendingGifs fetches trending items from the configured provider', async () => {
++  const tenorTrending = {
++    results: [
++      {
++        id: 'trend-1',
++        content_description: 'Trending Wow',
++        media_formats: {
++          gif: {
++            url: 'https://media.tenor.com/wow.gif',
++            dims: [300, 200],
++          },
++          tinygif: {
++            url: 'https://media.tenor.com/wow-thumb.gif',
++            dims: [150, 100],
++          },
++        },
++      },
++    ],
++    next: 'page-2',
++  }
++
++  let requestedUrl = ''
++  globalThis.fetch = (async (input: RequestInfo | URL) => {
++    requestedUrl = input.toString()
++    return new Response(JSON.stringify(tenorTrending), {
++      status: 200,
++      headers: { 'Content-Type': 'application/json' },
++    })
++  }) as unknown as typeof fetch
++
++  const result = await trendingGifs({ config: { provider: 'tenor', apiKey: 'trend-key' } })
++
++  expect(requestedUrl).toContain('tenor.googleapis.com/v2/featured')
++  expect(result.gifs[0].id).toBe('trend-1')
++  expect(result.next).toBe('page-2')
++})
++
++test('handles API errors gracefully and returns empty list', async () => {
++  globalThis.fetch = (async () => new Response('Rate limit', { status: 429 })) as unknown as typeof fetch
++
++  const result = await searchGifs('test', { config: { provider: 'tenor' } })
++  expect(result.gifs).toEqual([])
++  expect(result.next).toBeUndefined()
++})
+diff --git a/apps/web/src/features/chat/lib/gifClient.ts b/apps/web/src/features/chat/lib/gifClient.ts
+new file mode 100644
+index 00000000..f536d76d
+--- /dev/null
++++ b/apps/web/src/features/chat/lib/gifClient.ts
+@@ -0,0 +1,206 @@
++export interface GifItem {
++  id: string
++  title: string
++  url: string
++  previewUrl: string
++  width?: number
++  height?: number
++}
++
++export interface GifSearchResult {
++  gifs: GifItem[]
++  next?: string
++}
++
++export type GifProvider = 'tenor' | 'giphy' | 'custom'
++
++export interface GifConfig {
++  provider: GifProvider
++  apiKey?: string
++  endpoint?: string
++}
++
++export interface SearchGifsOptions {
++  limit?: number
++  next?: string
++  config?: Partial<GifConfig>
++}
++
++const DEFAULT_CLIENT_KEY = 'orbit'
++const DEFAULT_TENOR_API_KEY = 'LIVDSRZULELA'
++
++export function getGifConfig(override?: Partial<GifConfig>): GifConfig {
++  const provider = (override?.provider ||
++    import.meta.env?.VITE_ORBIT_GIF_PROVIDER ||
++    'tenor') as GifProvider
++  const apiKey =
++    override?.apiKey ||
++    import.meta.env?.VITE_ORBIT_GIF_API_KEY ||
++    (provider === 'tenor' ? DEFAULT_TENOR_API_KEY : undefined)
++  const endpoint = override?.endpoint || import.meta.env?.VITE_ORBIT_GIF_ENDPOINT
++
++  return { provider, apiKey, endpoint }
++}
++
++function parseGiphyItems(data: any): { gifs: GifItem[]; next?: string } {
++  const gifs: GifItem[] = (data.data || []).map((item: any) => ({
++    id: item.id,
++    title: item.title || 'GIF',
++    url: item.images?.original?.url || item.url,
++    previewUrl:
++      item.images?.fixed_width_small?.url ||
++      item.images?.preview_gif?.url ||
++      item.images?.original?.url,
++    width: item.images?.original?.width
++      ? parseInt(item.images.original.width, 10)
++      : undefined,
++    height: item.images?.original?.height
++      ? parseInt(item.images.original.height, 10)
++      : undefined,
++  }))
++
++  const next =
++    data.pagination &&
++    data.pagination.offset + data.pagination.count < data.pagination.total_count
++      ? String(data.pagination.offset + data.pagination.count)
++      : undefined
++
++  return { gifs, next }
++}
++
++function parseTenorItems(data: any): { gifs: GifItem[]; next?: string } {
++  const gifs: GifItem[] = (data.results || []).map((item: any) => {
++    const gif = item.media_formats?.gif || item.media?.[0]?.gif
++    const tiny =
++      item.media_formats?.tinygif ||
++      item.media?.[0]?.tinygif ||
++      item.media_formats?.nanogif ||
++      gif
++    return {
++      id: item.id,
++      title: item.content_description || item.title || 'GIF',
++      url: gif?.url,
++      previewUrl: tiny?.url || gif?.url,
++      width: gif?.dims?.[0],
++      height: gif?.dims?.[1],
++    }
++  })
++
++  return { gifs, next: data.next }
++}
++
++function parseCustomItems(data: any): { gifs: GifItem[]; next?: string } {
++  const list = data.results || data.gifs || data.data || []
++  const gifs: GifItem[] = list.map((item: any) => ({
++    id: String(item.id),
++    title: item.title || item.content_description || 'GIF',
++    url: item.url || item.media_formats?.gif?.url || item.images?.original?.url,
++    previewUrl:
++      item.previewUrl ||
++      item.preview_url ||
++      item.media_formats?.tinygif?.url ||
++      item.url,
++    width: item.width,
++    height: item.height,
++  }))
++
++  return { gifs, next: data.next }
++}
++
++interface ProviderAdapter {
++  buildUrl: (
++    type: 'search' | 'trending',
++    query: string | undefined,
++    config: GifConfig,
++    limit: number,
++    next?: string,
++  ) => string
++  parse: (data: any) => { gifs: GifItem[]; next?: string }
++}
++
++const GIPHY_ADAPTER: ProviderAdapter = {
++  buildUrl(type, query, config, limit, next) {
++    const base = config.endpoint || 'https://api.giphy.com/v1/gifs'
++    const url = new URL(type === 'search' ? `${base}/search` : `${base}/trending`)
++    if (query) url.searchParams.set('q', query)
++    if (config.apiKey) url.searchParams.set('api_key', config.apiKey)
++    url.searchParams.set('limit', String(limit))
++    if (next) url.searchParams.set('offset', next)
++    return url.toString()
++  },
++  parse: parseGiphyItems,
++}
++
++const TENOR_ADAPTER: ProviderAdapter = {
++  buildUrl(type, query, config, limit, next) {
++    const base = config.endpoint || 'https://tenor.googleapis.com/v2'
++    const url = new URL(type === 'search' ? `${base}/search` : `${base}/featured`)
++    if (query) url.searchParams.set('q', query)
++    if (config.apiKey) url.searchParams.set('key', config.apiKey)
++    url.searchParams.set('client_key', DEFAULT_CLIENT_KEY)
++    url.searchParams.set('limit', String(limit))
++    if (next) url.searchParams.set('pos', next)
++    return url.toString()
++  },
++  parse: parseTenorItems,
++}
++
++const CUSTOM_ADAPTER: ProviderAdapter = {
++  buildUrl(type, query, config, limit, next) {
++    const url = new URL(config.endpoint ? (type === 'search' ? config.endpoint : `${config.endpoint}/trending`) : '')
++    if (query) url.searchParams.set('q', query)
++    url.searchParams.set('limit', String(limit))
++    if (next) url.searchParams.set('pos', next)
++    if (config.apiKey) url.searchParams.set('key', config.apiKey)
++    return url.toString()
++  },
++  parse: parseCustomItems,
++}
++
++function getAdapter(provider: GifProvider, endpoint?: string): ProviderAdapter {
++  if (provider === 'giphy') return GIPHY_ADAPTER
++  if (provider === 'custom' && endpoint) return CUSTOM_ADAPTER
++  return TENOR_ADAPTER
++}
++
++export async function searchGifs(
++  query: string,
++  options?: SearchGifsOptions,
++): Promise<GifSearchResult> {
++  const q = query.trim()
++  if (!q) {
++    return trendingGifs(options)
++  }
++
++  const config = getGifConfig(options?.config)
++  const limit = options?.limit ?? 24
++  const adapter = getAdapter(config.provider, config.endpoint)
++
++  try {
++    const targetUrl = adapter.buildUrl('search', q, config, limit, options?.next)
++    const response = await fetch(targetUrl)
++    if (!response.ok) return { gifs: [] }
++    const data = await response.json()
++    return adapter.parse(data)
++  } catch {
++    return { gifs: [] }
++  }
++}
++
++export async function trendingGifs(
++  options?: SearchGifsOptions,
++): Promise<GifSearchResult> {
++  const config = getGifConfig(options?.config)
++  const limit = options?.limit ?? 24
++  const adapter = getAdapter(config.provider, config.endpoint)
++
++  try {
++    const targetUrl = adapter.buildUrl('trending', undefined, config, limit, options?.next)
++    const response = await fetch(targetUrl)
++    if (!response.ok) return { gifs: [] }
++    const data = await response.json()
++    return adapter.parse(data)
++  } catch {
++    return { gifs: [] }
++  }
++}
+-- 
+2.56.1.windows.1
+

@@ -2,7 +2,7 @@ From 79522997bb4e6c77ca3fc1c87c0dca592434ffdd Mon Sep 17 00:00:00 2001
 From: Torben Haack <t128n@ipv4.8shield.net>
 Date: Thu, 26 Nov 2026 18:13:25 +0100
 Subject: [PATCH] fix(mail): let the sandboxed view document out of the opener
- policy
+ policy and allow 'self' frame-src
 
 `add_security_headers` set `Cross-Origin-Opener-Policy: same-origin` on
 every response. Per the HTML Living Standard, a nested browsing context
@@ -11,18 +11,23 @@ so Chromium, Firefox and Safari abort the navigation of
 `/api/v1/mail/content/{token}` and the reading pane shows a broken
 document instead of the message.
 
+Additionally, the top-level Content Security Policy set `frame-src`
+without `'self'` (`frame-src blob: ...`), which caused browsers to block
+the reading pane iframe from navigating to `/api/v1/mail/content/{token}`.
+
 A handler that sets its own CSP (the sandboxed mail view document, the
 only one) now gets `unsafe-none` like its framing rules; its sandbox CSP
 keeps the frame from reaching the app. Every other response still
-isolates its opener. Covered at the platform layer, and against the real
-document in the mail content suite.
+isolates its opener. The top-level CSP includes `'self'` in `frame-src`.
+Covered at the platform layer, and against the real document in the mail
+content suite.
 
-Fixes t128n/torbit#23.
+Fixes t128n/torbit#23, t128n/torbit#29.
 ---
  apps/server/tests/mail_content.rs      | 17 +++++++++--
- crates/platform/src/http/security.rs   | 24 ++++++++++++++--
- crates/platform/tests/http_security.rs | 39 ++++++++++++++++++++++++++
- 3 files changed, 76 insertions(+), 4 deletions(-)
+ crates/platform/src/http/security.rs   | 32 +++++++++++++++++---
+ crates/platform/tests/http_security.rs | 42 +++++++++++++++++++++++++-
+ 3 files changed, 83 insertions(+), 8 deletions(-)
 
 diff --git a/apps/server/tests/mail_content.rs b/apps/server/tests/mail_content.rs
 index 5eaf4634..7bf276f5 100644
@@ -60,9 +65,27 @@ index 5eaf4634..7bf276f5 100644
      assert_eq!(html.matches("<script").count(), 1, "{html}");
      assert!(html.contains(&format!("<script nonce=\"{nonce}\">")));
 diff --git a/crates/platform/src/http/security.rs b/crates/platform/src/http/security.rs
-index 28f5b62d..94526155 100644
+index 28f5b62d..a1c36926 100644
 --- a/crates/platform/src/http/security.rs
 +++ b/crates/platform/src/http/security.rs
+@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
+ use std::net::{IpAddr, Ipv4Addr};
+ 
+ use axum::http::header::{
+-    CONTENT_SECURITY_POLICY, HeaderName, HeaderValue, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
++    HeaderName, HeaderValue, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
+     X_FRAME_OPTIONS,
+ };
+ use axum::http::{HeaderMap, Method, Uri};
+@@ -296,7 +296,7 @@ pub(crate) fn add_security_headers(
+     // `media-src` `https:` lets a document play an audio or video file the page links to.
+     let github_origin = github_host.web_origin();
+     let policy = format!(
+-        "default-src 'self'; {script_source}style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; frame-src blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' {github_origin}"
++        "default-src 'self'; {script_source}style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; frame-src 'self' blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' {github_origin}"
+     );
+     // A handler that sets its own policy keeps it (the sandboxed mail view document).
+     let handler_policy = headers.contains_key(CONTENT_SECURITY_POLICY);
 @@ -313,9 +313,16 @@ pub(crate) fn add_security_headers(
      if !handler_policy {
          headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
@@ -81,7 +104,7 @@ index 28f5b62d..94526155 100644
      );
      if !headers.contains_key(REFERRER_POLICY) {
          headers.insert(
-@@ -356,7 +363,7 @@ fn is_valid_http_origin(origin: &str) -> bool {
+@@ -356,10 +363,10 @@ fn is_valid_http_origin(origin: &str) -> bool {
  
  #[cfg(test)]
  mod tests {
@@ -89,11 +112,19 @@ index 28f5b62d..94526155 100644
 +    use axum::http::header::{AUTHORIZATION, CONTENT_SECURITY_POLICY, COOKIE, ORIGIN, UPGRADE};
      use axum::http::{HeaderMap, Method, Uri};
  
-     use super::{OriginPolicy, add_security_headers, bearer_token};
-@@ -369,6 +376,19 @@ mod tests {
-         assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
-     }
+-    use super::{OriginPolicy, add_security_headers, bearer_token};
++    use super::{add_security_headers, bearer_token, OriginPolicy};
  
+     #[test]
+     fn responses_refuse_framing_and_isolate_the_opener() {
+@@ -367,6 +374,21 @@ mod tests {
+         add_security_headers(&mut headers, true, None, &crate::GitHubHost::default());
+         assert_eq!(headers["x-frame-options"], "DENY");
+         assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
++        let csp = headers["content-security-policy"].to_str().unwrap();
++        assert!(csp.contains("frame-src 'self' blob:"));
++    }
++
 +    #[test]
 +    fn a_handler_with_its_own_policy_is_frameable_without_an_opener() {
 +        // The sandboxed mail view document: it frames fine, and it must not carry
@@ -105,16 +136,22 @@ index 28f5b62d..94526155 100644
 +        assert_eq!(headers["content-security-policy"], "sandbox");
 +        assert_eq!(headers["x-content-type-options"], "nosniff");
 +        assert_eq!(headers.get("x-frame-options"), None);
-+    }
-+
+     }
+ 
      fn permits(method: Method, path: &str, headers: &[(axum::http::HeaderName, &str)]) -> bool {
-         let mut map = HeaderMap::new();
-         for (name, value) in headers {
 diff --git a/crates/platform/tests/http_security.rs b/crates/platform/tests/http_security.rs
-index 04a9c4e7..4c073c5b 100644
+index 04a9c4e7..03c8a948 100644
 --- a/crates/platform/tests/http_security.rs
 +++ b/crates/platform/tests/http_security.rs
-@@ -540,6 +540,45 @@ async fn security_headers_are_added_to_every_response() {
+@@ -530,6 +530,7 @@ async fn security_headers_are_added_to_every_response() {
+         .to_str()
+         .unwrap();
+     assert!(csp.contains("default-src 'self'"));
++    assert!(csp.contains("frame-src 'self' blob:"));
+     assert!(csp.contains("frame-ancestors 'none'"));
+     assert!(csp.contains("form-action 'self' https://github.com"));
+     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+@@ -540,6 +541,45 @@ async fn security_headers_are_added_to_every_response() {
      assert!(response.headers().contains_key("permissions-policy"));
  }
  
@@ -160,6 +197,14 @@ index 04a9c4e7..4c073c5b 100644
  #[tokio::test]
  async fn internal_errors_are_replaced_with_safe_problem_details_and_the_request_id() {
      let app = test_app(OriginPolicy::new("https://orbit.test"));
+@@ -841,7 +881,7 @@ async fn csp_allows_only_the_verified_bootstrap_hash_and_local_image_variants()
+     assert!(!csp.contains("http:"));
+     assert_eq!(
+         csp,
+-        "default-src 'self'; script-src 'self' 'sha256-YWJj'; style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; frame-src blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' https://github.com"
++        "default-src 'self'; script-src 'self' 'sha256-YWJj'; style-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https:; frame-src 'self' blob: https://www.youtube-nocookie.com https://player.vimeo.com; media-src 'self' https:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self' https://github.com"
+     );
+ }
+ 
 -- 
-2.56.0.windows.4
-
+2.56.1.windows.1

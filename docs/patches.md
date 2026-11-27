@@ -89,3 +89,5 @@ prefix so an upstream feature cannot collide with it.
 | Native Windows Service | coollabsio/orbit#81 | local, upstreamable |
 | GitHub Enterprise host | coollabsio/orbit#82 | local, upstreamable |
 | Outlook bridge, unofficial-fork notice | none | local only |
+| Mail frame COOP and CSP frame-src exemption | t128n/torbit#23, t128n/torbit#29 | local, upstreamable |
+| Pele diagrams | t128n/torbit#25 | local, upstreamable |

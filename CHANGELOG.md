@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1+10
+
+- Fix email body framing under Content Security Policy: add `'self'` to the
+  top-level `frame-src` directive so the web reading pane is permitted to frame
+  the sandboxed `/api/v1/mail/content/{token}` endpoint (patch 0008).
+- Run the Outlook bridge logon task silently in the background with no console
+  window (`--windows-hide-console`, `Hidden: true`).
+
 ## 0.4.1+9
 
 - Fix the HTML message body in the web reading pane: the sandboxed iframe

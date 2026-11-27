@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1+11
+
+- Add GIF search and a picker popover to the chat composer toolbar (patch 0010,
+  ticket #30). Users can search, preview, and send animated GIFs directly in chat
+  channels and direct messages, powered by configurable GIF providers (Tenor,
+  Giphy, or custom/self-hosted endpoints).
+
 ## 0.4.1+10
 
 - Fix email body framing under Content Security Policy: add `'self'` to the

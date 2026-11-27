@@ -1,6 +1,6 @@
-From 0808a369800ce6065ea38317de7c9e6984598a87 Mon Sep 17 00:00:00 2001
+From 07c7f071644a2c5a73ae45ffd8b6a74a698a809f Mon Sep 17 00:00:00 2001
 From: Torben Haack <t128n@ipv4.8shield.net>
-Date: Fri, 27 Nov 2026 09:23:29 +0100
+Date: Fri, 27 Nov 2026 11:23:43 +0100
 Subject: [PATCH] feat(chat): add GIF search and picker to chat composer
 
 Add GIF search and a picker popover to the chat composer toolbar,
@@ -12,17 +12,17 @@ Closes t128n/torbit#30
 ---
  .../chat/components/composer/Composer.tsx     |  27 +++
  .../components/composer/GifPicker.test.tsx    | 139 ++++++++++++
- .../chat/components/composer/GifPicker.tsx    | 156 +++++++++++++
- .../src/features/chat/lib/gifClient.test.ts   | 161 ++++++++++++++
- apps/web/src/features/chat/lib/gifClient.ts   | 206 ++++++++++++++++++
- 5 files changed, 689 insertions(+)
+ .../chat/components/composer/GifPicker.tsx    | 163 ++++++++++++++
+ .../src/features/chat/lib/gifClient.test.ts   | 190 ++++++++++++++++
+ apps/web/src/features/chat/lib/gifClient.ts   | 211 ++++++++++++++++++
+ 5 files changed, 730 insertions(+)
  create mode 100644 apps/web/src/features/chat/components/composer/GifPicker.test.tsx
  create mode 100644 apps/web/src/features/chat/components/composer/GifPicker.tsx
  create mode 100644 apps/web/src/features/chat/lib/gifClient.test.ts
  create mode 100644 apps/web/src/features/chat/lib/gifClient.ts
 
 diff --git a/apps/web/src/features/chat/components/composer/Composer.tsx b/apps/web/src/features/chat/components/composer/Composer.tsx
-index 972e82c6..0f1805fd 100644
+index 972e82c6..24bd98c3 100644
 --- a/apps/web/src/features/chat/components/composer/Composer.tsx
 +++ b/apps/web/src/features/chat/components/composer/Composer.tsx
 @@ -36,7 +36,9 @@ import { ComposerReferencePreview } from './ComposerReferencePreview'
@@ -49,13 +49,13 @@ index 972e82c6..0f1805fd 100644
  
 +  function onPickGif(gif: GifItem) {
 +    setGifOpen(false)
-+    const markdown = `![${gif.title || 'GIF'}](${gif.url})`
++    const content = gif.embedUrl || gif.url
 +    if (text.trim() === '' && uploads.length === 0) {
-+      send({ conversationId, threadRootId, replyTo: replyTo && quoteOf(replyTo), body: markdown })
++      send({ conversationId, threadRootId, replyTo: replyTo && quoteOf(replyTo), body: content })
 +      onClearReply?.()
 +      onSent?.()
 +    } else {
-+      insertAtCursor(markdown)
++      insertAtCursor(text.endsWith(' ') || text === '' ? content : ` ${content}`)
 +    }
 +  }
 +
@@ -228,10 +228,10 @@ index 00000000..13c7418a
 +})
 diff --git a/apps/web/src/features/chat/components/composer/GifPicker.tsx b/apps/web/src/features/chat/components/composer/GifPicker.tsx
 new file mode 100644
-index 00000000..5ece7d4c
+index 00000000..6e296c8c
 --- /dev/null
 +++ b/apps/web/src/features/chat/components/composer/GifPicker.tsx
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,163 @@
 +import { useEffect, useRef, useState } from 'react'
 +import { Search4 } from 'reicon-react'
 +import { Tip } from '@/components/common/Tip'
@@ -310,7 +310,7 @@ index 00000000..5ece7d4c
 +  return (
 +    <div
 +      data-slot="gif-picker"
-+      className="flex max-h-[380px] w-[344px] max-w-[calc(100vw-2rem)] flex-col"
++      className="flex max-h-[420px] w-[360px] max-w-[calc(100vw-2rem)] flex-col"
 +    >
 +      <div className="p-2 pb-1.5">
 +        <InputGroup className="border-0 bg-secondary/40 dark:bg-secondary/40">
@@ -360,26 +360,33 @@ index 00000000..5ece7d4c
 +      ) : gifs.length > 0 ? (
 +        <div
 +          data-slot="gif-grid"
-+          className="grid min-h-0 grid-cols-2 gap-1.5 overflow-y-auto overscroll-contain px-2 pb-2"
++          className="min-h-0 columns-2 gap-1.5 overflow-y-auto overscroll-contain px-2 pb-2"
 +        >
 +          {gifs.map((gif) => (
-+            <Tip key={gif.id} label={gif.title}>
-+              <button
-+                type="button"
-+                data-slot="gif-button"
-+                aria-label={gif.title}
-+                className="group relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-md bg-muted/40 outline-none hover:opacity-90 focus-visible:ring-3 focus-visible:ring-ring/50"
-+                onClick={() => onPick(gif)}
-+              >
-+                <img
-+                  src={gif.previewUrl || gif.url}
-+                  alt={gif.title}
-+                  draggable={false}
-+                  loading="lazy"
-+                  className="size-full object-cover transition-transform group-hover:scale-105"
-+                />
-+              </button>
-+            </Tip>
++            <div key={gif.id} className="mb-1.5 break-inside-avoid">
++              <Tip label={gif.title}>
++                <button
++                  type="button"
++                  data-slot="gif-button"
++                  aria-label={gif.title}
++                  className="group relative flex w-full items-center justify-center overflow-hidden rounded-md bg-muted/40 outline-none hover:opacity-90 focus-visible:ring-3 focus-visible:ring-ring/50"
++                  onClick={() => onPick(gif)}
++                >
++                  <img
++                    src={gif.previewUrl || gif.url}
++                    alt={gif.title}
++                    draggable={false}
++                    loading="lazy"
++                    className="w-full rounded-md object-contain transition-transform group-hover:scale-105"
++                    style={
++                      gif.width && gif.height
++                        ? { aspectRatio: `${gif.width} / ${gif.height}` }
++                        : undefined
++                    }
++                  />
++                </button>
++              </Tip>
++            </div>
 +          ))}
 +        </div>
 +      ) : (
@@ -390,10 +397,10 @@ index 00000000..5ece7d4c
 +}
 diff --git a/apps/web/src/features/chat/lib/gifClient.test.ts b/apps/web/src/features/chat/lib/gifClient.test.ts
 new file mode 100644
-index 00000000..0df74ca5
+index 00000000..744cb63e
 --- /dev/null
 +++ b/apps/web/src/features/chat/lib/gifClient.test.ts
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,190 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { searchGifs, trendingGifs, type GifConfig } from './gifClient'
 +
@@ -449,6 +456,7 @@ index 00000000..0df74ca5
 +      title: 'Happy Dance Cat',
 +      url: 'https://media.tenor.com/cat-dance.gif',
 +      previewUrl: 'https://media.tenor.com/cat-dance-preview.gif',
++      embedUrl: 'https://media.tenor.com/cat-dance.gif',
 +      width: 400,
 +      height: 300,
 +    },
@@ -505,6 +513,7 @@ index 00000000..0df74ca5
 +      title: 'Celebration GIF',
 +      url: 'https://media.giphy.com/media/1/giphy.gif',
 +      previewUrl: 'https://media.giphy.com/media/1/100w.gif',
++      embedUrl: 'https://media.giphy.com/media/1/giphy.gif',
 +      width: 480,
 +      height: 270,
 +    },
@@ -548,6 +557,33 @@ index 00000000..0df74ca5
 +  expect(result.next).toBe('page-2')
 +})
 +
++test('searchGifs with Tenor parses itemurl into embedUrl', async () => {
++  const tenorResponse = {
++    results: [
++      {
++        id: 'tenor-2',
++        content_description: 'Party Parrot',
++        itemurl: 'https://tenor.com/view/party-parrot-gif-12345',
++        media_formats: {
++          gif: { url: 'https://media.tenor.com/parrot.gif' },
++          tinygif: { url: 'https://media.tenor.com/parrot-tiny.gif' },
++        },
++      },
++    ],
++  }
++
++  globalThis.fetch = (async () => {
++    return new Response(JSON.stringify(tenorResponse), {
++      status: 200,
++      headers: { 'Content-Type': 'application/json' },
++    })
++  }) as unknown as typeof fetch
++
++  const result = await searchGifs('parrot')
++  expect(result.gifs[0].embedUrl).toBe('https://tenor.com/view/party-parrot-gif-12345')
++  expect(result.gifs[0].url).toBe('https://media.tenor.com/parrot.gif')
++})
++
 +test('handles API errors gracefully and returns empty list', async () => {
 +  globalThis.fetch = (async () => new Response('Rate limit', { status: 429 })) as unknown as typeof fetch
 +
@@ -557,15 +593,16 @@ index 00000000..0df74ca5
 +})
 diff --git a/apps/web/src/features/chat/lib/gifClient.ts b/apps/web/src/features/chat/lib/gifClient.ts
 new file mode 100644
-index 00000000..f536d76d
+index 00000000..4f6cd004
 --- /dev/null
 +++ b/apps/web/src/features/chat/lib/gifClient.ts
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,211 @@
 +export interface GifItem {
 +  id: string
 +  title: string
 +  url: string
 +  previewUrl: string
++  embedUrl?: string
 +  width?: number
 +  height?: number
 +}
@@ -589,8 +626,9 @@ index 00000000..f536d76d
 +  config?: Partial<GifConfig>
 +}
 +
-+const DEFAULT_CLIENT_KEY = 'orbit'
-+const DEFAULT_TENOR_API_KEY = 'LIVDSRZULELA'
++// Tenor web client key and official public browser API key
++const DEFAULT_CLIENT_KEY = 'tenor_web'
++const DEFAULT_TENOR_API_KEY = 'AIzaSyCZt6SSh5VgVPzD9fhyzG1DprdPRhtoaR4'
 +
 +export function getGifConfig(override?: Partial<GifConfig>): GifConfig {
 +  const provider = (override?.provider ||
@@ -614,6 +652,7 @@ index 00000000..f536d76d
 +      item.images?.fixed_width_small?.url ||
 +      item.images?.preview_gif?.url ||
 +      item.images?.original?.url,
++    embedUrl: item.url || item.images?.original?.url,
 +    width: item.images?.original?.width
 +      ? parseInt(item.images.original.width, 10)
 +      : undefined,
@@ -644,6 +683,7 @@ index 00000000..f536d76d
 +      title: item.content_description || item.title || 'GIF',
 +      url: gif?.url,
 +      previewUrl: tiny?.url || gif?.url,
++      embedUrl: item.itemurl || item.url || gif?.url,
 +      width: gif?.dims?.[0],
 +      height: gif?.dims?.[1],
 +    }
@@ -663,6 +703,7 @@ index 00000000..f536d76d
 +      item.preview_url ||
 +      item.media_formats?.tinygif?.url ||
 +      item.url,
++    embedUrl: item.itemurl || item.url || item.media_formats?.gif?.url,
 +    width: item.width,
 +    height: item.height,
 +  }))

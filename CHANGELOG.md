@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1+13
+
+- Allow client-side GIF search under Content Security Policy by adding
+  `connect-src 'self' https:` to security headers, permitting the browser to
+  query Tenor, Giphy, and custom providers without violating `default-src 'self'`
+  (patch 0010).
+
 ## 0.4.1+12
 
 - Switch Tenor GIF search in the chat composer to the official client browser
